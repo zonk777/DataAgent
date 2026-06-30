@@ -5,6 +5,7 @@ import random
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, timedelta
+from urllib.parse import quote_plus
 from typing import Any, Iterator
 
 import pymysql
@@ -281,6 +282,31 @@ class MySQLConnection:
         self._conn.close()
 
 
+class SQLiteConnection:
+    """SQLite wrapper that accepts the same placeholder style used by MySQL code."""
+
+    def __init__(self, conn: sqlite3.Connection) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params: tuple | list | None = None) -> sqlite3.Cursor:
+        return self._conn.execute(_sqlite_sql(sql), params or ())
+
+    def executemany(self, sql: str, params: list[tuple] | tuple[tuple, ...]) -> sqlite3.Cursor:
+        return self._conn.executemany(_sqlite_sql(sql), params)
+
+    def executescript(self, script: str) -> sqlite3.Cursor:
+        return self._conn.executescript(_sqlite_sql(script))
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
 def _split_sql_script(script: str) -> list[str]:
     return [statement.strip() for statement in script.split(";") if statement.strip() and not statement.strip().startswith("PRAGMA")]
 
@@ -291,8 +317,30 @@ def _mysql_sql(sql: str) -> str:
     return sql.replace("?", "%s")
 
 
+def _sqlite_sql(sql: str) -> str:
+    sql = sql.strip()
+    sql = sql.replace("INSERT IGNORE INTO", "INSERT OR IGNORE INTO")
+    return sql.replace("%s", "?")
+
+
 def using_mysql() -> bool:
     return get_settings().database_backend.lower() == "mysql"
+
+
+def _engine():
+    """SQLAlchemy engine for pandas to_sql/read_sql helpers."""
+    from sqlalchemy import create_engine
+
+    settings = get_settings()
+    if settings.database_backend.lower() == "mysql":
+        user = quote_plus(settings.mysql_user)
+        password = quote_plus(settings.mysql_password)
+        database = quote_plus(settings.mysql_database)
+        url = f"mysql+pymysql://{user}:{password}@{settings.mysql_host}:{settings.mysql_port}/{database}?charset=utf8mb4"
+    else:
+        settings.database_file.parent.mkdir(parents=True, exist_ok=True)
+        url = f"sqlite:///{settings.database_file.as_posix()}"
+    return create_engine(url)
 
 
 @contextmanager
@@ -315,9 +363,10 @@ def connect() -> Iterator[Any]:
         db = MySQLConnection(conn)
     else:
         settings.database_file.parent.mkdir(parents=True, exist_ok=True)
-        db = sqlite3.connect(settings.database_file, timeout=settings.sql_timeout_seconds)
-        db.row_factory = sqlite3.Row
-        db.execute("PRAGMA foreign_keys=ON")
+        raw = sqlite3.connect(settings.database_file, timeout=settings.sql_timeout_seconds)
+        raw.row_factory = sqlite3.Row
+        raw.execute("PRAGMA foreign_keys=ON")
+        db = SQLiteConnection(raw)
     try:
         yield db
         db.commit()

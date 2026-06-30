@@ -19,7 +19,7 @@ def keyword_search(question: str, dataset_id: int | None, limit: int = 4) -> lis
     with connect() as conn:
         if dataset_id:
             rows = conn.execute(
-                "SELECT id, title, content, category, dataset_id FROM knowledge_chunks WHERE dataset_id = ? OR dataset_id IS NULL",
+                "SELECT id, title, content, category, dataset_id FROM knowledge_chunks WHERE dataset_id = %s OR dataset_id IS NULL",
                 (dataset_id,),
             ).fetchall()
         else:

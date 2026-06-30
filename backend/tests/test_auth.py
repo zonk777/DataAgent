@@ -9,8 +9,8 @@ def test_password_hash_verification() -> None:
     assert "18437431" not in password_hash
 
 
-def test_initial_admin_is_seeded(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "auth_test.db"))
+def test_initial_admin_is_seeded(monkeypatch) -> None:
+    monkeypatch.setenv("MYSQL_DATABASE", "dataagent_test")
     initialize_database()
 
     admin = authenticate("liuze", "18437431")
@@ -19,8 +19,8 @@ def test_initial_admin_is_seeded(monkeypatch, tmp_path) -> None:
     assert admin["is_initial_admin"] is True
 
 
-def test_initial_admin_can_create_normal_admin(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "auth_test.db"))
+def test_initial_admin_can_create_normal_admin(monkeypatch) -> None:
+    monkeypatch.setenv("MYSQL_DATABASE", "dataagent_test")
     initialize_database()
     initial = authenticate("liuze", "18437431")
     created = create_admin("normal_admin", "123456", initial["id"])
@@ -28,6 +28,6 @@ def test_initial_admin_can_create_normal_admin(monkeypatch, tmp_path) -> None:
     assert created["username"] == "normal_admin"
     assert created["is_initial_admin"] is False
     with connect() as conn:
-        row = conn.execute("SELECT password_hash FROM admin_users WHERE username = ?", ("normal_admin",)).fetchone()
+        row = conn.execute("SELECT password_hash FROM admin_users WHERE username = %s", ("normal_admin",)).fetchone()
     assert row is not None
     assert verify_password("123456", row["password_hash"]) is True

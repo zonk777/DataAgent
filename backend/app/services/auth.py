@@ -51,7 +51,7 @@ def verify_password(password: str, password_hash: str) -> bool:
 def _dataset_permissions(user_id: int) -> list[int]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT dataset_id FROM user_dataset_permissions WHERE user_id = ? ORDER BY dataset_id",
+            "SELECT dataset_id FROM user_dataset_permissions WHERE user_id = %s ORDER BY dataset_id",
             (user_id,),
         ).fetchall()
     return [int(row["dataset_id"]) for row in rows]
@@ -59,10 +59,10 @@ def _dataset_permissions(user_id: int) -> list[int]:
 
 def _set_dataset_permissions(user_id: int, dataset_ids: list[int] | None) -> None:
     with connect() as conn:
-        conn.execute("DELETE FROM user_dataset_permissions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_dataset_permissions WHERE user_id = %s", (user_id,))
         for dataset_id in dataset_ids or []:
             conn.execute(
-                "INSERT OR IGNORE INTO user_dataset_permissions(user_id, dataset_id) VALUES (?, ?)",
+                "INSERT IGNORE INTO user_dataset_permissions(user_id, dataset_id) VALUES (%s, %s)",
                 (user_id, int(dataset_id)),
             )
 
@@ -89,7 +89,7 @@ def authenticate(username: str, password: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
             """SELECT id, username, password_hash, role, is_initial_admin, created_by, created_at
-               FROM admin_users WHERE username = ?""",
+               FROM admin_users WHERE username = %s""",
             (username,),
         ).fetchone()
     if not row or not verify_password(password, row["password_hash"]):
@@ -101,9 +101,9 @@ def create_session(admin_id: int) -> tuple[str, str]:
     token = secrets.token_urlsafe(32)
     expires_at = _utc_now() + timedelta(days=SESSION_DAYS)
     with connect() as conn:
-        conn.execute("DELETE FROM admin_sessions WHERE expires_at <= ?", (_iso(_utc_now()),))
+        conn.execute("DELETE FROM admin_sessions WHERE expires_at <= %s", (_iso(_utc_now()),))
         conn.execute(
-            "INSERT INTO admin_sessions(token, admin_id, expires_at) VALUES (?, ?, ?)",
+            "INSERT INTO admin_sessions(token, admin_id, expires_at) VALUES (%s, %s, %s)",
             (token, admin_id, _iso(expires_at)),
         )
     return token, _iso(expires_at)
@@ -113,7 +113,7 @@ def destroy_session(token: str | None) -> None:
     if not token:
         return
     with connect() as conn:
-        conn.execute("DELETE FROM admin_sessions WHERE token = ?", (token,))
+        conn.execute("DELETE FROM admin_sessions WHERE token = %s", (token,))
 
 
 def admin_from_session(token: str | None) -> dict | None:
@@ -124,7 +124,7 @@ def admin_from_session(token: str | None) -> dict | None:
             """SELECT u.id, u.username, u.role, u.is_initial_admin, u.created_by, u.created_at
                FROM admin_sessions s
                JOIN admin_users u ON u.id = s.admin_id
-               WHERE s.token = ? AND s.expires_at > ?""",
+               WHERE s.token = %s AND s.expires_at > %s""",
             (token, _iso(_utc_now())),
         ).fetchone()
     return _public_admin(row) if row else None
@@ -170,15 +170,15 @@ def create_admin(
         with connect() as conn:
             cursor = conn.execute(
                 """INSERT INTO admin_users(username, password_hash, role, is_initial_admin, created_by)
-                   VALUES (?, ?, ?, 0, ?)""",
+                   VALUES (%s, %s, %s, 0, %s)""",
                 (username.strip(), hash_password(password), role, creator_id),
             )
             row = conn.execute(
-                "SELECT id, username, role, is_initial_admin, created_by, created_at FROM admin_users WHERE id = ?",
+                "SELECT id, username, role, is_initial_admin, created_by, created_at FROM admin_users WHERE id = %s",
                 (cursor.lastrowid,),
             ).fetchone()
     except Exception as exc:
-        if "UNIQUE" in str(exc).upper():
+        if "UNIQUE" in str(exc).upper() or "Duplicate" in str(exc):
             raise HTTPException(status_code=409, detail="该账号已存在") from exc
         raise
     _set_dataset_permissions(int(row["id"]), dataset_ids)
@@ -187,19 +187,19 @@ def create_admin(
 
 def update_admin(user_id: int, role: str, dataset_ids: list[int] | None = None) -> dict:
     with connect() as conn:
-        row = conn.execute("SELECT is_initial_admin FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT is_initial_admin FROM admin_users WHERE id = %s", (user_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="用户不存在")
         if row["is_initial_admin"]:
             role = "initial_admin"
         else:
             role = _normalize_role(role)
-        conn.execute("UPDATE admin_users SET role = ? WHERE id = ?", (role, user_id))
+        conn.execute("UPDATE admin_users SET role = %s WHERE id = %s", (role, user_id))
     if not row["is_initial_admin"]:
         _set_dataset_permissions(user_id, dataset_ids)
     with connect() as conn:
         updated = conn.execute(
-            "SELECT id, username, role, is_initial_admin, created_by, created_at FROM admin_users WHERE id = ?",
+            "SELECT id, username, role, is_initial_admin, created_by, created_at FROM admin_users WHERE id = %s",
             (user_id,),
         ).fetchone()
     return _public_admin(updated)
@@ -209,9 +209,9 @@ def delete_admin(user_id: int, actor_id: int) -> None:
     if user_id == actor_id:
         raise HTTPException(status_code=400, detail="不能删除当前登录账号")
     with connect() as conn:
-        row = conn.execute("SELECT is_initial_admin FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+        row = conn.execute("SELECT is_initial_admin FROM admin_users WHERE id = %s", (user_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="用户不存在")
         if row["is_initial_admin"]:
             raise HTTPException(status_code=400, detail="不能删除初始管理员")
-        conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))
+        conn.execute("DELETE FROM admin_users WHERE id = %s", (user_id,))

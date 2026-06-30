@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 import tempfile
@@ -19,13 +20,23 @@ import httpx
 import pandas as pd
 
 from ..config import get_settings
-from ..db import _engine
+from ..db import connect
 
 # ---------------------------------------------------------------------------
 # Import whitelist – only pandas / numpy are permitted
 # ---------------------------------------------------------------------------
 _ALLOWED_IMPORTS = {"pandas", "numpy", "math", "json", "datetime", "collections", "itertools", "functools", "statistics", "re", "decimal", "fractions", "random", "operator", "typing"}
 _BLOCKED_MODULES = {"os", "sys", "subprocess", "shutil", "socket", "http", "urllib", "requests", "httpx", "openpyxl", "psycopg2", "pymysql", "pickle", "marshal", "ctypes", "importlib", "compileall", "code", "codeop", "pty", "fcntl", "tty", "pdb", "traceback", "inspect"}
+
+
+def _quote_identifier(value: str) -> str:
+    return f"`{value.replace('`', '``')}`"
+
+
+def _load_table_frame(table_name: str) -> pd.DataFrame:
+    with connect() as conn:
+        rows = conn.execute(f"SELECT * FROM {_quote_identifier(table_name)}").fetchall()
+    return pd.DataFrame([dict(row) for row in rows])
 
 
 def _validate_imports(code: str) -> None:
@@ -118,6 +129,65 @@ async def _generate_python_code(
         raise RuntimeError(f"Python 代码生成失败：{exc}") from exc
 
 
+async def _repair_python_code(
+    question: str,
+    table_name: str,
+    columns: list[dict[str, Any]],
+    row_count: int,
+    knowledge: list[dict[str, Any]] | None,
+    failed_code: str,
+    error: str,
+    traceback: str | None,
+) -> str:
+    """Ask the LLM to repair a failed Pandas script using the structured error."""
+    settings = get_settings()
+    if not settings.llm_configured:
+        raise RuntimeError("LLM 未配置，无法自动修复 Python 代码")
+
+    prompt = {
+        "task": "修复上一版 Python/Pandas 分析代码。只输出可运行 Python 代码，不要 Markdown，不要解释。",
+        "question": question,
+        "schema": {
+            "table_name": table_name,
+            "row_count": row_count,
+            "columns": columns,
+            "knowledge": (knowledge or [])[:3],
+        },
+        "failed_code": failed_code,
+        "error": error,
+        "traceback": traceback or "",
+        "requirements": [
+            "数据已经在 DataFrame df 中，不要访问数据库、文件系统或网络。",
+            "只能使用 pandas、numpy 和允许的标准库。",
+            "最终必须 print(json.dumps(result, ensure_ascii=False, default=str))。",
+            "result 必须包含 summary 字符串、data 列表，可选 chart_suggestion。",
+        ],
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                json={
+                    "model": settings.llm_model,
+                    "temperature": 0,
+                    "messages": [
+                        {"role": "system", "content": "你是 Python 数据分析代码修复器。只输出代码。"},
+                        {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+                    ],
+                },
+            )
+            response.raise_for_status()
+            code = response.json()["choices"][0]["message"]["content"].strip()
+            if code.startswith("```"):
+                code = re.sub(r"^```(?:python)?\s*\n?", "", code)
+                code = re.sub(r"\n?```\s*$", "", code)
+            return code
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError(f"Python 代码自动修复失败：{exc}") from exc
+
+
 # ---------------------------------------------------------------------------
 # Sandbox execution
 # ---------------------------------------------------------------------------
@@ -131,7 +201,15 @@ async def _run_sandbox(
 
     Data is passed as a JSON file to avoid granting the sandbox database access.
     """
-    _validate_imports(code)
+    try:
+        _validate_imports(code)
+    except ValueError as exc:
+        return {
+            "success": False,
+            "error": "代码安全校验失败",
+            "traceback": str(exc),
+            "result": None,
+        }
 
     wrapper = f"""
 import json, warnings
@@ -160,6 +238,7 @@ with open(DATA_PATH, "r", encoding="utf-8") as _f:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=tmp_dir,
+            env={**os.environ, "PYTHONIOENCODING": "utf-8"},
         )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             proc.communicate(), timeout=timeout
@@ -195,6 +274,33 @@ with open(DATA_PATH, "r", encoding="utf-8") as _f:
             pass
 
 
+def _result_structure_error(result: dict[str, Any]) -> str | None:
+    if not result.get("success"):
+        return None
+    payload = result.get("result")
+    if not isinstance(payload, dict):
+        return "Python 输出必须是 JSON 对象"
+    if not isinstance(payload.get("summary"), str) or not payload.get("summary", "").strip():
+        return "Python 输出缺少 summary 字符串"
+    if "data" not in payload:
+        payload["data"] = []
+    if not isinstance(payload.get("data"), list):
+        return "Python 输出 data 必须是列表"
+    return None
+
+
+def _repair_stats(attempts: list[dict[str, Any]], success: bool) -> dict[str, Any]:
+    repair_attempts = max(0, len(attempts) - 1)
+    return {
+        "attempts": len(attempts),
+        "repair_attempts": repair_attempts,
+        "repaired": success and repair_attempts > 0,
+        "success": success,
+        "repair_success_rate": (1.0 if success else 0.0) if repair_attempts else None,
+        "history": attempts,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -227,23 +333,86 @@ async def execute_python_analysis(
             "traceback": None,
             "result": None,
             "code": "",
+            "repair_stats": _repair_stats([], False),
         }
 
     try:
         code = await _generate_python_code(question, table_name, columns, row_count, knowledge)
     except RuntimeError as exc:
-        return {"success": False, "error": str(exc), "traceback": None, "result": None, "code": ""}
+        return {
+            "success": False,
+            "error": str(exc),
+            "traceback": None,
+            "result": None,
+            "code": "",
+            "repair_stats": _repair_stats([], False),
+        }
 
-    # Load data from MySQL and dump to a temp JSON file for the sandbox
-    df = pd.read_sql_query(f"SELECT * FROM `{table_name}`", _engine())
+    # Load data through the application's DB adapter, then pass JSON to the sandbox.
+    df = _load_table_frame(table_name)
     tmp_data_file = tempfile.NamedTemporaryFile(
         mode="w", suffix=".json", delete=False, encoding="utf-8", prefix="dataagent_data_"
     )
     df.to_json(tmp_data_file, orient="records", force_ascii=False)
     tmp_data_file.close()
 
+    attempts: list[dict[str, Any]] = []
+    result: dict[str, Any] = {
+        "success": False,
+        "error": "Python 分析未执行",
+        "traceback": None,
+        "result": None,
+    }
     try:
-        result = await _run_sandbox(code, table_name, tmp_data_file.name, timeout)
+        for attempt_no in range(1, 4):
+            result = await _run_sandbox(code, table_name, tmp_data_file.name, timeout)
+            structure_error = _result_structure_error(result)
+            if structure_error:
+                result = {
+                    "success": False,
+                    "error": structure_error,
+                    "traceback": json.dumps(result.get("result"), ensure_ascii=False, default=str)[:1500],
+                    "result": None,
+                }
+            attempts.append(
+                {
+                    "attempt": attempt_no,
+                    "success": bool(result.get("success")),
+                    "error": result.get("error"),
+                    "traceback": result.get("traceback"),
+                }
+            )
+            if result.get("success"):
+                break
+            if attempt_no >= 3:
+                break
+            try:
+                code = await _repair_python_code(
+                    question,
+                    table_name,
+                    columns,
+                    row_count,
+                    knowledge,
+                    code,
+                    str(result.get("error") or ""),
+                    result.get("traceback"),
+                )
+            except RuntimeError as exc:
+                result = {
+                    "success": False,
+                    "error": str(exc),
+                    "traceback": result.get("traceback"),
+                    "result": None,
+                }
+                attempts.append(
+                    {
+                        "attempt": attempt_no + 1,
+                        "success": False,
+                        "error": str(exc),
+                        "traceback": result.get("traceback"),
+                    }
+                )
+                break
     finally:
         try:
             Path(tmp_data_file.name).unlink(missing_ok=True)
@@ -251,4 +420,5 @@ async def execute_python_analysis(
             pass
 
     result["code"] = code
+    result["repair_stats"] = _repair_stats(attempts, bool(result.get("success")))
     return result

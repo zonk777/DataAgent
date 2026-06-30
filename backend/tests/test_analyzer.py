@@ -99,3 +99,40 @@ def test_python_analysis_is_used_for_complex_trend_question(monkeypatch) -> None
     assert payload["chart"]["x_field"] == "维度"
     assert payload["chart"]["y_field"] == "同比"
     assert payload["python_code"] == "print('ok')"
+
+
+def test_sql_auto_repair_recovers_from_bad_llm_sql(monkeypatch) -> None:
+    initialize_database()
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    async def fake_classify_intent(question, history):
+        return IntentResult("data_query", 0.99, "test", "sql repair route")
+
+    async def fake_generate_llm_sql(question, dataset, limit):
+        return "SELECT missing_column FROM data_demo_sales LIMIT 10"
+
+    async def fake_repair_llm_sql(question, dataset, limit, failed_sql, error):
+        assert "missing_column" in failed_sql
+        return 'SELECT region AS "区域", ROUND(SUM(sales_amount), 2) AS "销售额" FROM data_demo_sales GROUP BY region LIMIT 500'
+
+    async def fake_polish_insights(question, rows, draft, knowledge):
+        return draft
+
+    async def fake_search_knowledge(question, dataset_id=None, limit=5):
+        return []
+
+    monkeypatch.setattr("app.services.analyzer.classify_intent", fake_classify_intent)
+    monkeypatch.setattr("app.services.analyzer.generate_llm_sql", fake_generate_llm_sql)
+    monkeypatch.setattr("app.services.analyzer.repair_llm_sql", fake_repair_llm_sql)
+    monkeypatch.setattr("app.services.analyzer.polish_insights", fake_polish_insights)
+    monkeypatch.setattr("app.services.analyzer.search_knowledge", fake_search_knowledge)
+
+    payload = asyncio.run(analyze("统计各地区销售额", None, None))
+
+    assert payload["sql_source"] == "llm_sql_repair"
+    assert payload["sql_repair"]["repaired"] is True
+    assert payload["sql_repair"]["repair_attempts"] == 1
+    assert payload["sql_repair"]["repair_success_rate"] == 1.0
+    assert len(payload["sql_repair"]["history"]) == 2
+    assert payload["rows"]

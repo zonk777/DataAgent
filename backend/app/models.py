@@ -129,6 +129,7 @@ class AnalysisResponse(BaseModel):
     knowledge_refs: list[dict[str, Any]]
     execution_mode: str
     analysis_engine: str | None = None
+    sql_repair: dict[str, Any] | None = None
     python_analysis: dict[str, Any] | None = None
     python_code: str | None = None
     answer_type: Literal["data_analysis", "knowledge_qa"] = "data_analysis"

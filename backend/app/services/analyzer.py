@@ -16,7 +16,7 @@ from .llm import answer_from_knowledge, polish_insights
 from .planner import build_plan_steps, plan_titles
 from .python_executor import execute_python_analysis
 from .security import validate_readonly_sql
-from .sql_generator import generate_llm_sql, query_plan_source
+from .sql_generator import generate_llm_sql, query_plan_source, repair_llm_sql
 
 
 REGIONS = ["华东", "华南", "华北", "西南"]
@@ -311,6 +311,81 @@ def _apply_python_chart(chart: dict[str, Any], suggestion: Any) -> dict[str, Any
     return updated
 
 
+def _sql_repair_stats(attempts: list[dict[str, Any]], success: bool) -> dict[str, Any]:
+    repair_attempts = max(0, len(attempts) - 1)
+    return {
+        "attempts": len(attempts),
+        "repair_attempts": repair_attempts,
+        "repaired": success and repair_attempts > 0,
+        "success": success,
+        "repair_success_rate": (1.0 if success else 0.0) if repair_attempts else None,
+        "history": attempts,
+    }
+
+
+async def _execute_sql_with_repair(
+    question: str,
+    dataset: dict,
+    query_plan: QueryPlan,
+    limit: int,
+) -> tuple[str, list[dict[str, Any]], str, dict[str, Any]]:
+    settings = get_settings()
+    llm_sql = await generate_llm_sql(question, dataset, limit)
+    plan_source = query_plan_source(question, llm_sql)
+    template_sql = query_plan.sql
+    candidate_sql = llm_sql or template_sql
+    candidate_params: list[Any] = [] if llm_sql else query_plan.params
+    attempts: list[dict[str, Any]] = []
+
+    for attempt_no in range(1, 4):
+        try:
+            safe_sql = validate_readonly_sql(candidate_sql, dataset["table_name"])
+            with connect() as conn:
+                result = conn.execute(safe_sql, candidate_params).fetchall()
+                rows = [_jsonable_row(dict(row)) for row in result]
+            attempts.append(
+                {
+                    "attempt": attempt_no,
+                    "success": True,
+                    "source": plan_source,
+                    "sql": safe_sql,
+                    "error": None,
+                }
+            )
+            return safe_sql, rows, plan_source, _sql_repair_stats(attempts, True)
+        except Exception as exc:
+            error = str(exc)
+            attempts.append(
+                {
+                    "attempt": attempt_no,
+                    "success": False,
+                    "source": plan_source,
+                    "sql": candidate_sql,
+                    "error": error,
+                }
+            )
+            if attempt_no >= 3:
+                break
+            repaired_sql = None
+            if settings.llm_configured:
+                repaired_sql = await repair_llm_sql(question, dataset, limit, candidate_sql, error)
+            if repaired_sql and repaired_sql != candidate_sql:
+                candidate_sql = repaired_sql
+                candidate_params = []
+                plan_source = "llm_sql_repair"
+                continue
+            if candidate_sql != template_sql:
+                candidate_sql = template_sql
+                candidate_params = query_plan.params
+                plan_source = "template_sql_repair_fallback"
+                continue
+            break
+
+    repair_stats = _sql_repair_stats(attempts, False)
+    last_error = attempts[-1]["error"] if attempts else "未知 SQL 执行错误"
+    raise ValueError(f"SQL 自动修复失败：{last_error}; repair_stats={json.dumps(repair_stats, ensure_ascii=False)}")
+
+
 def _load_history(session_id: str | None) -> list[dict[str, Any]]:
     if not session_id:
         return []
@@ -485,12 +560,12 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
     dataset = _dataset(dataset_id)
     dataset_id = dataset["id"]
     query_plan = _build_query(effective_question, dataset, settings.query_row_limit)
-    llm_sql = await generate_llm_sql(effective_question, dataset, settings.query_row_limit)
-    plan_source = query_plan_source(effective_question, llm_sql)
-    safe_sql = validate_readonly_sql(llm_sql or query_plan.sql, dataset["table_name"])
-    with connect() as conn:
-        result = conn.execute(safe_sql, query_plan.params).fetchall()
-        rows = [_jsonable_row(dict(row)) for row in result]
+    safe_sql, rows, plan_source, sql_repair = await _execute_sql_with_repair(
+        effective_question,
+        dataset,
+        query_plan,
+        settings.query_row_limit,
+    )
 
     knowledge = await search_knowledge(effective_question, dataset_id)
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
@@ -535,6 +610,7 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
             "error": python_result.get("error"),
             "traceback": python_result.get("traceback"),
             "result": python_payload,
+            "repair_stats": python_result.get("repair_stats"),
         }
         if python_result.get("success") and python_payload:
             analysis_engine = "python_pandas"
@@ -574,6 +650,7 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
         "knowledge_refs": knowledge,
         "execution_mode": execution_mode,
         "analysis_engine": analysis_engine,
+        "sql_repair": sql_repair,
         "python_analysis": python_analysis,
         "python_code": python_code,
         "answer_type": "data_analysis",

@@ -23,6 +23,34 @@ class KnowledgeCreate(BaseModel):
     dataset_id: int | None = None
 
 
+class KnowledgeUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+    content: str = Field(min_length=2, max_length=10000)
+    category: str = "business_rule"
+    dataset_id: int | None = None
+
+
+class DatasetUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+    description: str = ""
+
+
+class DatasetColumnUpdate(BaseModel):
+    description: str = Field(max_length=1000)
+
+
+class MySQLImportRequest(BaseModel):
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=3306, ge=1, le=65535)
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(default="", max_length=256)
+    database: str = Field(min_length=1, max_length=128)
+    table: str = Field(min_length=1, max_length=128)
+    name: str | None = Field(default=None, max_length=120)
+    description: str = Field(default="", max_length=1000)
+    limit: int = Field(default=100000, ge=1, le=1000000)
+
+
 class LoginRequest(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=128)
@@ -31,6 +59,13 @@ class LoginRequest(BaseModel):
 class AdminCreate(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=6, max_length=128)
+    role: Literal["admin", "data_analyst", "business_user"] = "admin"
+    dataset_ids: list[int] = Field(default_factory=list)
+
+
+class AdminUpdate(BaseModel):
+    role: Literal["admin", "data_analyst", "business_user"] = "admin"
+    dataset_ids: list[int] = Field(default_factory=list)
 
 
 class ChartSpec(BaseModel):

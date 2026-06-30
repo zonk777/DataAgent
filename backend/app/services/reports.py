@@ -112,6 +112,41 @@ def build_html_report(data: ReportData) -> str:
     <h2>回答与发现</h2><ul>{insights}</ul>{table}{sql}{refs}</body></html>"""
 
 
+def build_markdown_report(data: ReportData) -> bytes:
+    payload = data.payload
+    lines: list[str] = [
+        f"# {_report_title(data)}",
+        "",
+        "## 报告概况",
+        "",
+        f"- 会话编号：{data.session['id']}",
+        f"- 分析问题：{data.question}",
+        f"- 分析类型：{payload.get('intent', '')}",
+        f"- 执行模式：{payload.get('execution_mode', '')}",
+        f"- 生成时间：{data.assistant_message.get('created_at', '')}",
+        "",
+        "## 回答与关键发现",
+        "",
+    ]
+    for idx, insight in enumerate(payload.get("insights") or [], 1):
+        lines.append(f"{idx}. {insight}")
+    if payload.get("rows"):
+        columns = payload.get("columns", [])
+        lines.extend(["", "## 查询结果", "", "| " + " | ".join(map(str, columns)) + " |"])
+        lines.append("| " + " | ".join("---" for _ in columns) + " |")
+        for row in payload.get("rows", [])[:120]:
+            lines.append("| " + " | ".join(_safe_text(row.get(column, "")).replace("|", "\\|") for column in columns) + " |")
+        if len(payload.get("rows", [])) > 120:
+            lines.append(f"\n> 结果共 {len(payload.get('rows', []))} 行，Markdown 仅展示前 120 行。")
+    if payload.get("sql"):
+        lines.extend(["", "## 执行 SQL", "", "```sql", payload["sql"], "```"])
+    if payload.get("knowledge_refs"):
+        lines.extend(["", "## 知识依据", ""])
+        for item in payload["knowledge_refs"]:
+            lines.append(f"- **{item.get('title', '')}**（{item.get('category', '')}）：{item.get('content', '')}")
+    return "\n".join(lines).encode("utf-8")
+
+
 def _find_font_path() -> Path | None:
     return next((path for path in FONT_CANDIDATES if path.exists()), None)
 

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
 import ResultChart from './components/ResultChart.vue'
 import { api } from './api'
-import type { AdminUser, AnalysisResult, ChatMessage, ConfigStatus, DashboardData, Dataset, KnowledgeItem, SessionSummary, ViewName } from './types'
+import type { AdminUser, AnalysisResult, AuditLog, ChatMessage, ConfigStatus, DashboardData, Dataset, DatasetQuality, KnowledgeItem, SessionSummary, ViewName } from './types'
 
 const activeView = ref<ViewName>('overview')
 const dashboard = ref<DashboardData | null>(null)
@@ -14,6 +14,7 @@ const sessions = ref<SessionSummary[]>([])
 const chatMessages = ref<ChatMessage[]>([])
 const selectedDatasetId = ref<number | undefined>()
 const selectedDataset = ref<Dataset | null>(null)
+const selectedDatasetQuality = ref<DatasetQuality | null>(null)
 const result = ref<AnalysisResult | null>(null)
 const question = ref('分析近30天各地区销售额趋势')
 const loading = ref(false)
@@ -24,14 +25,25 @@ const uploadFile = ref<File | null>(null)
 const uploadName = ref('')
 const uploadDescription = ref('')
 const uploading = ref(false)
+const datasetEdit = ref({ name: '', description: '' })
+const columnDrafts = ref<Record<string, string>>({})
+const mysqlForm = ref({ host: '127.0.0.1', port: 3306, username: 'root', password: '', database: '', table: '', name: '', description: '', limit: 100000 })
+const importingMysql = ref(false)
 const knowledgeForm = ref({ title: '', content: '', category: 'business_rule' })
+const editingKnowledgeId = ref<number | null>(null)
+const knowledgeFile = ref<File | null>(null)
+const knowledgeUploadTitle = ref('')
+const uploadingKnowledge = ref(false)
 const currentAdmin = ref<AdminUser | null>(null)
 const admins = ref<AdminUser[]>([])
 const authChecked = ref(false)
 const loginForm = ref({ username: '', password: '' })
 const loginLoading = ref(false)
-const newAdminForm = ref({ username: '', password: '' })
+const newAdminForm = ref({ username: '', password: '', role: 'admin', dataset_ids: [] as number[] })
 const creatingAdmin = ref(false)
+const auditLogs = ref<AuditLog[]>([])
+const auditFilters = ref({ username: '', action: '', date_from: '', date_to: '' })
+const loadingAudit = ref(false)
 
 const navItems: Array<{ id: ViewName; label: string; icon: string }> = [
   { id: 'overview', label: '工作台', icon: 'home' },
@@ -39,11 +51,34 @@ const navItems: Array<{ id: ViewName; label: string; icon: string }> = [
   { id: 'datasets', label: '数据源', icon: 'database' },
   { id: 'knowledge', label: '业务知识库', icon: 'book' },
   { id: 'accounts', label: '账户管理', icon: 'settings' },
+  { id: 'audit', label: '审计日志', icon: 'file' },
   { id: 'settings', label: '系统配置', icon: 'settings' },
 ]
 
 const pageTitle = computed(() => navItems.find((item) => item.id === activeView.value)?.label || 'DataAgent')
 const examples = ['统计各地区销售额', '按月份展示销售额趋势', '查询投诉率最高的区域', '分析华东地区转化率']
+const roleOptions = [
+  { value: 'admin', label: '管理员' },
+  { value: 'data_analyst', label: '数据分析人员' },
+  { value: 'business_user', label: '业务人员' },
+]
+
+function roleLabel(role?: string) {
+  if (role === 'initial_admin') return '初始管理员'
+  return roleOptions.find((item) => item.value === role)?.label || '管理员'
+}
+
+function canManageData() {
+  return ['initial_admin', 'admin', 'data_analyst'].includes(currentAdmin.value?.role || '')
+}
+
+function auditQuery() {
+  const params = new URLSearchParams()
+  Object.entries(auditFilters.value).forEach(([key, value]) => {
+    if (value) params.set(key, value)
+  })
+  return params.toString() ? `?${params.toString()}` : ''
+}
 
 async function loadBase() {
   try {
@@ -182,6 +217,9 @@ async function inspectDataset(id: number) {
   activeView.value = 'datasets'
   selectedDatasetId.value = id
   selectedDataset.value = await api.dataset(id)
+  selectedDatasetQuality.value = await api.datasetQuality(id)
+  datasetEdit.value = { name: selectedDataset.value.name, description: selectedDataset.value.description }
+  columnDrafts.value = Object.fromEntries((selectedDataset.value.columns || []).map((column) => [column.name, column.description]))
 }
 
 function chooseFile(event: Event) {
@@ -198,6 +236,9 @@ async function upload() {
     datasets.value = await api.datasets()
     selectedDatasetId.value = created.id
     selectedDataset.value = created
+    selectedDatasetQuality.value = await api.datasetQuality(created.id)
+    datasetEdit.value = { name: created.name, description: created.description }
+    columnDrafts.value = Object.fromEntries((created.columns || []).map((column) => [column.name, column.description]))
     uploadFile.value = null
     uploadName.value = ''
     uploadDescription.value = ''
@@ -209,13 +250,96 @@ async function upload() {
   }
 }
 
+async function saveDatasetMeta() {
+  if (!selectedDataset.value) return
+  selectedDataset.value = await api.updateDataset(selectedDataset.value.id, datasetEdit.value)
+  datasets.value = await api.datasets()
+}
+
+async function saveColumnDescription(columnName: string) {
+  if (!selectedDataset.value) return
+  selectedDataset.value = await api.updateDatasetColumn(selectedDataset.value.id, columnName, columnDrafts.value[columnName] || '')
+}
+
+async function deleteSelectedDataset() {
+  if (!selectedDataset.value) return
+  if (!window.confirm(`确定删除数据源「${selectedDataset.value.name}」吗？相关知识片段和分析权限也会同步失效。`)) return
+  await api.deleteDataset(selectedDataset.value.id)
+  datasets.value = await api.datasets()
+  selectedDataset.value = null
+  selectedDatasetQuality.value = null
+  selectedDatasetId.value = datasets.value[0]?.id
+  dashboard.value = await api.dashboard()
+}
+
+async function importMysql() {
+  if (!mysqlForm.value.host || !mysqlForm.value.database || !mysqlForm.value.table || !mysqlForm.value.username) return
+  importingMysql.value = true
+  error.value = ''
+  try {
+    const created = await api.importMysql(mysqlForm.value)
+    datasets.value = await api.datasets()
+    selectedDatasetId.value = created.id
+    await inspectDataset(created.id)
+    mysqlForm.value = { host: '127.0.0.1', port: 3306, username: 'root', password: '', database: '', table: '', name: '', description: '', limit: 100000 }
+    dashboard.value = await api.dashboard()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'MySQL 导入失败'
+  } finally {
+    importingMysql.value = false
+  }
+}
+
+function chooseKnowledgeFile(event: Event) {
+  knowledgeFile.value = (event.target as HTMLInputElement).files?.[0] || null
+}
+
+async function uploadKnowledgeDocument() {
+  if (!knowledgeFile.value) return
+  uploadingKnowledge.value = true
+  error.value = ''
+  try {
+    await api.uploadKnowledge(knowledgeFile.value, knowledgeUploadTitle.value, knowledgeForm.value.category, selectedDatasetId.value)
+    knowledge.value = await api.knowledge()
+    config.value = await api.config()
+    dashboard.value = await api.dashboard()
+    knowledgeFile.value = null
+    knowledgeUploadTitle.value = ''
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '上传知识文档失败'
+  } finally {
+    uploadingKnowledge.value = false
+  }
+}
+
 async function addKnowledge() {
   if (!knowledgeForm.value.title || !knowledgeForm.value.content) return
-  await api.createKnowledge({ ...knowledgeForm.value, dataset_id: selectedDatasetId.value })
+  if (editingKnowledgeId.value) {
+    await api.updateKnowledge(editingKnowledgeId.value, { ...knowledgeForm.value, dataset_id: selectedDatasetId.value })
+  } else {
+    await api.createKnowledge({ ...knowledgeForm.value, dataset_id: selectedDatasetId.value })
+  }
   knowledge.value = await api.knowledge()
   dashboard.value = await api.dashboard()
   config.value = await api.config()
   knowledgeForm.value = { title: '', content: '', category: 'business_rule' }
+  editingKnowledgeId.value = null
+}
+
+function editKnowledgeItem(item: KnowledgeItem) {
+  editingKnowledgeId.value = item.id
+  selectedDatasetId.value = item.dataset_id || selectedDatasetId.value
+  knowledgeForm.value = { title: item.title, content: item.content, category: item.category }
+}
+
+function cancelKnowledgeEdit() {
+  editingKnowledgeId.value = null
+  knowledgeForm.value = { title: '', content: '', category: 'business_rule' }
+}
+
+async function reindexKnowledge() {
+  await api.reindexKnowledge()
+  config.value = await api.config()
 }
 
 async function deleteKnowledgeItem(item: KnowledgeItem) {
@@ -237,7 +361,7 @@ async function addAdmin() {
   error.value = ''
   try {
     await api.createAdmin(newAdminForm.value)
-    newAdminForm.value = { username: '', password: '' }
+    newAdminForm.value = { username: '', password: '', role: 'admin', dataset_ids: [] }
     admins.value = await api.admins()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '新增管理员失败'
@@ -245,6 +369,33 @@ async function addAdmin() {
     creatingAdmin.value = false
   }
 }
+
+async function saveAdminPermission(admin: AdminUser) {
+  await api.updateAdmin(admin.id, { role: admin.role, dataset_ids: admin.dataset_permissions || [] })
+  admins.value = await api.admins()
+}
+
+async function deleteAdminAccount(admin: AdminUser) {
+  if (!window.confirm(`确定删除账号「${admin.username}」吗？`)) return
+  await api.deleteAdmin(admin.id)
+  admins.value = await api.admins()
+}
+
+async function loadAuditLogs() {
+  loadingAudit.value = true
+  error.value = ''
+  try {
+    auditLogs.value = await api.auditLogs(auditQuery())
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '读取审计日志失败'
+  } finally {
+    loadingAudit.value = false
+  }
+}
+
+watch(activeView, (view) => {
+  if (view === 'audit' && !auditLogs.value.length) loadAuditLogs()
+})
 
 onMounted(bootstrap)
 </script>
@@ -376,6 +527,7 @@ onMounted(bootstrap)
                   <a :href="api.reportUrl(result.session_id, 'html')" target="_blank"><AppIcon name="file" :size="17" />HTML</a>
                   <a :href="api.reportUrl(result.session_id, 'docx')" download><AppIcon name="file" :size="17" />Word</a>
                   <a :href="api.reportUrl(result.session_id, 'pdf')" download><AppIcon name="file" :size="17" />PDF</a>
+                  <a :href="api.reportUrl(result.session_id, 'md')" download><AppIcon name="file" :size="17" />Markdown</a>
                 </div>
               </div>
               <div class="result-meta"><span>{{ result.intent }}</span><span>{{ result.execution_mode }}</span><span>{{ result.answer_type === 'knowledge_qa' ? `${result.knowledge_refs.length} 条知识依据` : `${result.rows.length} 条结果` }}</span><span v-if="result.context_applied">已使用对话上下文</span></div>
@@ -392,39 +544,103 @@ onMounted(bootstrap)
       </section>
 
       <section v-else-if="activeView === 'datasets'" class="page">
-        <div class="page-intro"><div><span class="eyebrow"><AppIcon name="database" :size="16" /> DATA CATALOG</span><h2>数据源与元数据</h2><p>上传 CSV / Excel，系统会自动识别字段、样例和缺失情况。</p></div></div>
+        <div class="page-intro"><div><span class="eyebrow"><AppIcon name="database" :size="16" /> DATA CATALOG</span><h2>数据源与元数据</h2><p>支持 CSV / Excel / MySQL 接入，自动识别字段、预览样例并生成数据质量检查。</p></div></div>
         <div class="dataset-layout">
-          <article class="panel upload-panel"><h3><AppIcon name="upload" />导入数据文件</h3><label class="drop-zone"><input type="file" accept=".csv,.xlsx" @change="chooseFile"/><AppIcon name="upload" :size="32"/><strong>{{ uploadFile?.name || '选择 CSV / Excel 文件' }}</strong><small>单文件最大 20MB</small></label><input v-model="uploadName" placeholder="数据集名称（可选）"/><textarea v-model="uploadDescription" placeholder="数据集用途与说明" rows="3"/><button class="primary-btn" :disabled="!uploadFile || uploading" @click="upload">{{ uploading ? '正在导入...' : '开始导入' }}</button></article>
+          <article class="panel upload-panel">
+            <h3><AppIcon name="upload" />导入数据文件</h3>
+            <label class="drop-zone"><input type="file" accept=".csv,.xls,.xlsx" @change="chooseFile"/><AppIcon name="upload" :size="32"/><strong>{{ uploadFile?.name || '选择 CSV / Excel 文件' }}</strong><small>单文件最大 100MB</small></label>
+            <input v-model="uploadName" placeholder="数据集名称（可选）"/>
+            <textarea v-model="uploadDescription" placeholder="数据集用途与说明" rows="3"/>
+            <button class="primary-btn" :disabled="!uploadFile || uploading || !canManageData()" @click="upload">{{ uploading ? '正在导入...' : '开始导入' }}</button>
+          </article>
+          <article class="panel upload-panel">
+            <h3><AppIcon name="database" />导入 MySQL 表</h3>
+            <input v-model="mysqlForm.host" placeholder="主机地址，如 127.0.0.1"/>
+            <input v-model.number="mysqlForm.port" type="number" placeholder="端口"/>
+            <input v-model="mysqlForm.username" placeholder="用户名"/>
+            <input v-model="mysqlForm.password" type="password" placeholder="密码"/>
+            <input v-model="mysqlForm.database" placeholder="数据库名"/>
+            <input v-model="mysqlForm.table" placeholder="表名"/>
+            <input v-model="mysqlForm.name" placeholder="导入后的数据集名称（可选）"/>
+            <button class="primary-btn" :disabled="importingMysql || !canManageData()" @click="importMysql">{{ importingMysql ? '正在导入...' : '连接并导入' }}</button>
+          </article>
           <article class="panel"><div class="panel-title"><div><small>CONNECTED</small><h3>已接入数据集</h3></div></div><div class="dataset-cards"><button v-for="dataset in datasets" :key="dataset.id" :class="{ selected: selectedDatasetId === dataset.id }" @click="inspectDataset(dataset.id)"><span><AppIcon name="database" /></span><div><strong>{{ dataset.name }}</strong><small>{{ dataset.description || '暂无描述' }}</small><em>{{ dataset.row_count.toLocaleString() }} 行 · {{ dataset.column_count }} 字段</em></div><i>{{ dataset.source_type }}</i></button></div></article>
         </div>
-        <article v-if="selectedDataset" class="panel metadata-panel"><div class="panel-title"><div><small>METADATA</small><h3>{{ selectedDataset.name }} · 字段说明</h3></div></div><div class="table-scroll"><table><thead><tr><th>字段</th><th>类型</th><th>业务说明</th><th>样例值</th><th>缺失率</th></tr></thead><tbody><tr v-for="column in selectedDataset.columns" :key="column.name"><td><code>{{ column.name }}</code></td><td>{{ column.data_type }}</td><td>{{ column.description }}</td><td>{{ column.sample_value }}</td><td>{{ (column.null_rate * 100).toFixed(1) }}%</td></tr></tbody></table></div></article>
+        <article v-if="selectedDataset" class="panel metadata-panel">
+          <div class="panel-title">
+            <div><small>METADATA</small><h3>{{ selectedDataset.name }} · 字段说明</h3></div>
+            <button v-if="canManageData()" class="danger-lite" @click="deleteSelectedDataset">删除数据源</button>
+          </div>
+          <div class="meta-edit-row">
+            <input v-model="datasetEdit.name" placeholder="数据集名称"/>
+            <input v-model="datasetEdit.description" placeholder="数据集说明"/>
+            <button @click="saveDatasetMeta">保存元数据</button>
+          </div>
+          <div v-if="selectedDatasetQuality" class="quality-grid">
+            <div v-for="item in selectedDatasetQuality.summary" :key="item">{{ item }}</div>
+          </div>
+          <div class="table-scroll"><table><thead><tr><th>字段</th><th>类型</th><th>业务说明</th><th>样例值</th><th>缺失率</th><th>操作</th></tr></thead><tbody><tr v-for="column in selectedDataset.columns" :key="column.name"><td><code>{{ column.name }}</code></td><td>{{ column.data_type }}</td><td><input v-model="columnDrafts[column.name]" class="inline-input"/></td><td>{{ column.sample_value }}</td><td>{{ (column.null_rate * 100).toFixed(1) }}%</td><td><button @click="saveColumnDescription(column.name)">保存</button></td></tr></tbody></table></div>
+          <div v-if="selectedDataset.preview?.length" class="preview-block"><h3>前 100 行样例数据</h3><div class="table-scroll"><table><thead><tr><th v-for="column in selectedDataset.columns" :key="column.name">{{ column.name }}</th></tr></thead><tbody><tr v-for="(row, index) in selectedDataset.preview.slice(0, 100)" :key="index"><td v-for="column in selectedDataset.columns" :key="column.name">{{ row[column.name] }}</td></tr></tbody></table></div></div>
+        </article>
       </section>
 
       <section v-else-if="activeView === 'knowledge'" class="page">
         <div class="page-intro"><div><span class="eyebrow"><AppIcon name="book" :size="16" /> BUSINESS KNOWLEDGE</span><h2>指标口径与业务知识</h2><p>用于 RAG 检索，让智能体理解企业专有字段、指标和规则。</p></div></div>
         <div class="knowledge-layout">
-          <article class="panel knowledge-form"><h3>新增知识片段</h3><input v-model="knowledgeForm.title" placeholder="标题，如：销售额口径"/><select v-model="knowledgeForm.category"><option value="metric">指标口径</option><option value="business_rule">业务规则</option><option value="data_dictionary">数据字典</option><option value="example">历史问答</option></select><textarea v-model="knowledgeForm.content" rows="7" placeholder="输入详细定义、适用范围和计算规则"/><button class="primary-btn" @click="addKnowledge">保存并加入索引</button></article>
-          <div class="knowledge-list"><article v-for="item in knowledge" :key="item.id" class="knowledge-card"><span><AppIcon name="book" /></span><div><div class="knowledge-card-head"><strong>{{ item.title }}</strong><div><em>{{ item.category }}</em><button type="button" @click="deleteKnowledgeItem(item)">删除</button></div></div><p>{{ item.content }}</p></div></article></div>
+          <article class="panel knowledge-form">
+            <h3>{{ editingKnowledgeId ? '编辑知识片段' : '新增知识片段' }}</h3>
+            <input v-model="knowledgeForm.title" placeholder="标题，如：销售额口径"/>
+            <select v-model="knowledgeForm.category"><option value="metric">指标口径</option><option value="business_rule">业务规则</option><option value="data_dictionary">数据字典</option><option value="example">历史问答</option></select>
+            <textarea v-model="knowledgeForm.content" rows="7" placeholder="输入详细定义、适用范围和计算规则"/>
+            <button class="primary-btn" :disabled="!canManageData()" @click="addKnowledge">{{ editingKnowledgeId ? '保存修改并重建索引' : '保存并加入索引' }}</button>
+            <button v-if="editingKnowledgeId" class="secondary-btn" @click="cancelKnowledgeEdit">取消编辑</button>
+            <div class="knowledge-upload-box">
+              <h3>上传业务文档</h3>
+              <input type="file" accept=".docx,.pdf,.md,.markdown,.txt" @change="chooseKnowledgeFile"/>
+              <input v-model="knowledgeUploadTitle" placeholder="文档标题（可选）"/>
+              <button class="primary-btn" :disabled="!knowledgeFile || uploadingKnowledge || !canManageData()" @click="uploadKnowledgeDocument">{{ uploadingKnowledge ? '正在切片...' : '上传并自动切片' }}</button>
+              <button class="secondary-btn" :disabled="!canManageData()" @click="reindexKnowledge">重建向量索引</button>
+            </div>
+          </article>
+          <div class="knowledge-list"><article v-for="item in knowledge" :key="item.id" class="knowledge-card"><span><AppIcon name="book" /></span><div><div class="knowledge-card-head"><strong>{{ item.title }}</strong><div><em>{{ item.category }}</em><button type="button" @click="editKnowledgeItem(item)">编辑</button><button type="button" @click="deleteKnowledgeItem(item)">删除</button></div></div><p>{{ item.content }}</p></div></article></div>
         </div>
       </section>
 
       <section v-else-if="activeView === 'accounts'" class="page">
-        <div class="page-intro"><div><span class="eyebrow"><AppIcon name="settings" :size="16" /> ACCOUNT MANAGEMENT</span><h2>账户管理</h2><p>初始管理员可以新增其他普通管理员；普通管理员只能查看账户列表。</p></div></div>
+        <div class="page-intro"><div><span class="eyebrow"><AppIcon name="settings" :size="16" /> ACCOUNT MANAGEMENT</span><h2>账户与权限管理</h2><p>初始管理员可以创建用户、分配角色，并限制可访问的数据源。</p></div></div>
         <div class="account-layout">
           <article class="panel account-form">
-            <h3>加入新管理员</h3>
+            <h3>加入新用户</h3>
             <template v-if="currentAdmin?.is_initial_admin">
-              <input v-model="newAdminForm.username" placeholder="新管理员账号"/>
-              <input v-model="newAdminForm.password" type="password" placeholder="新管理员密码，至少 6 位"/>
-              <button class="primary-btn" :disabled="creatingAdmin" @click="addAdmin">{{ creatingAdmin ? '正在创建...' : '新增管理员' }}</button>
+              <input v-model="newAdminForm.username" placeholder="账号"/>
+              <input v-model="newAdminForm.password" type="password" placeholder="密码，至少 6 位"/>
+              <select v-model="newAdminForm.role"><option v-for="role in roleOptions" :key="role.value" :value="role.value">{{ role.label }}</option></select>
+              <select v-model="newAdminForm.dataset_ids" multiple size="4"><option v-for="dataset in datasets" :key="dataset.id" :value="dataset.id">{{ dataset.name }}</option></select>
+              <small class="field-help">不选择数据源时，管理员/数据分析人员默认可访问全部数据源；业务人员建议明确授权。</small>
+              <button class="primary-btn" :disabled="creatingAdmin" @click="addAdmin">{{ creatingAdmin ? '正在创建...' : '新增用户' }}</button>
             </template>
-            <div v-else class="permission-note"><AppIcon name="check" :size="16"/>当前账号是普通管理员，无权限新增其他管理员。</div>
+            <div v-else class="permission-note"><AppIcon name="check" :size="16"/>当前账号无权限新增或修改其他用户。</div>
           </article>
           <article class="panel">
-            <div class="panel-title"><div><small>ADMINS</small><h3>管理员列表</h3></div></div>
-            <div class="table-scroll"><table><thead><tr><th>ID</th><th>账号</th><th>角色</th><th>创建时间</th></tr></thead><tbody><tr v-for="admin in admins" :key="admin.id"><td>{{ admin.id }}</td><td>{{ admin.username }}</td><td>{{ admin.is_initial_admin ? '初始管理员' : '普通管理员' }}</td><td>{{ admin.created_at }}</td></tr></tbody></table></div>
+            <div class="panel-title"><div><small>USERS</small><h3>账号列表</h3></div></div>
+            <div class="table-scroll"><table><thead><tr><th>ID</th><th>账号</th><th>角色</th><th>授权数据源</th><th>创建时间</th><th>操作</th></tr></thead><tbody><tr v-for="admin in admins" :key="admin.id"><td>{{ admin.id }}</td><td>{{ admin.username }}</td><td><select v-model="admin.role" :disabled="admin.is_initial_admin || !currentAdmin?.is_initial_admin"><option value="initial_admin" disabled>初始管理员</option><option v-for="role in roleOptions" :key="role.value" :value="role.value">{{ role.label }}</option></select></td><td><select v-model="admin.dataset_permissions" multiple size="3" :disabled="admin.is_initial_admin || !currentAdmin?.is_initial_admin"><option v-for="dataset in datasets" :key="dataset.id" :value="dataset.id">{{ dataset.name }}</option></select></td><td>{{ admin.created_at }}</td><td><button :disabled="admin.is_initial_admin || !currentAdmin?.is_initial_admin" @click="saveAdminPermission(admin)">保存</button><button class="danger-lite" :disabled="admin.is_initial_admin || !currentAdmin?.is_initial_admin" @click="deleteAdminAccount(admin)">删除</button></td></tr></tbody></table></div>
           </article>
         </div>
+      </section>
+
+      <section v-else-if="activeView === 'audit'" class="page">
+        <div class="page-intro"><div><span class="eyebrow"><AppIcon name="file" :size="16" /> AUDIT LOG</span><h2>审计日志</h2><p>记录登录、数据源、知识库、分析、报告导出和权限变更等关键操作。</p></div></div>
+        <article class="panel">
+          <div class="audit-filter-row">
+            <input v-model="auditFilters.username" placeholder="用户名"/>
+            <input v-model="auditFilters.action" placeholder="操作类型，如 export_report"/>
+            <input v-model="auditFilters.date_from" type="date"/>
+            <input v-model="auditFilters.date_to" type="date"/>
+            <button @click="loadAuditLogs">{{ loadingAudit ? '查询中...' : '查询' }}</button>
+            <a class="download-link" :href="api.auditExportUrl(auditQuery())" download>导出 Excel</a>
+          </div>
+          <div class="table-scroll"><table><thead><tr><th>ID</th><th>用户</th><th>操作</th><th>资源</th><th>详情</th><th>状态</th><th>时间</th></tr></thead><tbody><tr v-for="log in auditLogs" :key="log.id"><td>{{ log.id }}</td><td>{{ log.username || '-' }}</td><td>{{ log.action }}</td><td>{{ log.resource_type }}<template v-if="log.resource_id"> / {{ log.resource_id }}</template></td><td>{{ log.detail }}</td><td>{{ log.status }}</td><td>{{ log.created_at }}</td></tr></tbody></table></div>
+        </article>
       </section>
 
       <section v-else class="page">

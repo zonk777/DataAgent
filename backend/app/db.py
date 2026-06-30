@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    username TEXT,
     action TEXT NOT NULL,
     resource_type TEXT NOT NULL,
     resource_id TEXT,
@@ -77,9 +79,16 @@ CREATE TABLE IF NOT EXISTS admin_users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'admin',
     is_initial_admin INTEGER NOT NULL DEFAULT 0,
     created_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS user_dataset_permissions (
+    user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    PRIMARY KEY(user_id, dataset_id)
 );
 
 CREATE TABLE IF NOT EXISTS admin_sessions (
@@ -111,10 +120,36 @@ def connect() -> Iterator[sqlite3.Connection]:
 def initialize_database() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        _migrate_schema(conn)
         _seed_initial_admin(conn)
         exists = conn.execute("SELECT id FROM datasets LIMIT 1").fetchone()
         if not exists:
             _seed_demo_dataset(conn)
+
+
+def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+
+
+def _migrate_schema(conn: sqlite3.Connection) -> None:
+    """Apply lightweight SQLite migrations for existing local development databases."""
+    if not _has_column(conn, "admin_users", "role"):
+        conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+    if not _has_column(conn, "audit_logs", "user_id"):
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN user_id INTEGER")
+    if not _has_column(conn, "audit_logs", "username"):
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN username TEXT")
+    if not _has_column(conn, "sessions", "user_id"):
+        conn.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER")
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS user_dataset_permissions (
+            user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+            dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+            PRIMARY KEY(user_id, dataset_id)
+        )"""
+    )
+    conn.execute("UPDATE admin_users SET role = 'initial_admin' WHERE is_initial_admin = 1")
+    conn.execute("UPDATE admin_users SET role = 'admin' WHERE role IS NULL OR role = ''")
 
 
 def _seed_initial_admin(conn: sqlite3.Connection) -> None:
@@ -124,7 +159,7 @@ def _seed_initial_admin(conn: sqlite3.Connection) -> None:
     from .services.auth import hash_password
 
     conn.execute(
-        "INSERT INTO admin_users(username, password_hash, is_initial_admin) VALUES (?, ?, 1)",
+        "INSERT INTO admin_users(username, password_hash, role, is_initial_admin) VALUES (?, ?, 'initial_admin', 1)",
         ("liuze", hash_password("18437431")),
     )
 

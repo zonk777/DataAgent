@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     vector_store: str = "qdrant"
     qdrant_path: str = "storage/qdrant"
 
-    max_upload_mb: int = Field(default=20, ge=1, le=200)
+    max_upload_mb: int = Field(default=100, ge=1, le=200)
     query_row_limit: int = Field(default=500, ge=10, le=5000)
     sql_timeout_seconds: int = Field(default=15, ge=1, le=120)
 

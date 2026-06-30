@@ -48,10 +48,37 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
+def _dataset_permissions(user_id: int) -> list[int]:
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT dataset_id FROM user_dataset_permissions WHERE user_id = ? ORDER BY dataset_id",
+            (user_id,),
+        ).fetchall()
+    return [int(row["dataset_id"]) for row in rows]
+
+
+def _set_dataset_permissions(user_id: int, dataset_ids: list[int] | None) -> None:
+    with connect() as conn:
+        conn.execute("DELETE FROM user_dataset_permissions WHERE user_id = ?", (user_id,))
+        for dataset_id in dataset_ids or []:
+            conn.execute(
+                "INSERT OR IGNORE INTO user_dataset_permissions(user_id, dataset_id) VALUES (?, ?)",
+                (user_id, int(dataset_id)),
+            )
+
+
+def _normalize_role(role: str | None) -> str:
+    role = (role or "admin").strip()
+    return role if role in {"initial_admin", "admin", "data_analyst", "business_user"} else "business_user"
+
+
 def _public_admin(row: Any) -> dict:
+    role = "initial_admin" if bool(row["is_initial_admin"]) else _normalize_role(row["role"])
     return {
         "id": int(row["id"]),
         "username": row["username"],
+        "role": role,
+        "dataset_permissions": _dataset_permissions(int(row["id"])),
         "is_initial_admin": bool(row["is_initial_admin"]),
         "created_by": row["created_by"],
         "created_at": row["created_at"],
@@ -61,7 +88,8 @@ def _public_admin(row: Any) -> dict:
 def authenticate(username: str, password: str) -> dict | None:
     with connect() as conn:
         row = conn.execute(
-            "SELECT id, username, password_hash, is_initial_admin, created_by, created_at FROM admin_users WHERE username = ?",
+            """SELECT id, username, password_hash, role, is_initial_admin, created_by, created_at
+               FROM admin_users WHERE username = ?""",
             (username,),
         ).fetchone()
     if not row or not verify_password(password, row["password_hash"]):
@@ -93,7 +121,7 @@ def admin_from_session(token: str | None) -> dict | None:
         return None
     with connect() as conn:
         row = conn.execute(
-            """SELECT u.id, u.username, u.is_initial_admin, u.created_by, u.created_at
+            """SELECT u.id, u.username, u.role, u.is_initial_admin, u.created_by, u.created_at
                FROM admin_sessions s
                JOIN admin_users u ON u.id = s.admin_id
                WHERE s.token = ? AND s.expires_at > ?""",
@@ -112,35 +140,78 @@ def current_admin(request: Request) -> dict:
 def require_initial_admin(request: Request) -> dict:
     admin = current_admin(request)
     if not admin.get("is_initial_admin"):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有初始管理员可以新增管理员")
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="只有初始管理员可以管理账号与权限")
     return admin
 
 
 def list_admins() -> list[dict]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, username, is_initial_admin, created_by, created_at FROM admin_users ORDER BY id"
+            "SELECT id, username, role, is_initial_admin, created_by, created_at FROM admin_users ORDER BY id"
         ).fetchall()
     return [_public_admin(row) for row in rows]
 
 
-def create_admin(username: str, password: str, creator_id: int) -> dict:
+def create_admin(
+    username: str,
+    password: str,
+    creator_id: int,
+    role: str = "admin",
+    dataset_ids: list[int] | None = None,
+) -> dict:
     if not username.strip():
         raise HTTPException(status_code=400, detail="账号不能为空")
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="密码至少需要 6 位")
+    role = _normalize_role(role)
+    if role == "initial_admin":
+        role = "admin"
     try:
         with connect() as conn:
             cursor = conn.execute(
-                "INSERT INTO admin_users(username, password_hash, is_initial_admin, created_by) VALUES (?, ?, 0, ?)",
-                (username.strip(), hash_password(password), creator_id),
+                """INSERT INTO admin_users(username, password_hash, role, is_initial_admin, created_by)
+                   VALUES (?, ?, ?, 0, ?)""",
+                (username.strip(), hash_password(password), role, creator_id),
             )
             row = conn.execute(
-                "SELECT id, username, is_initial_admin, created_by, created_at FROM admin_users WHERE id = ?",
+                "SELECT id, username, role, is_initial_admin, created_by, created_at FROM admin_users WHERE id = ?",
                 (cursor.lastrowid,),
             ).fetchone()
     except Exception as exc:
         if "UNIQUE" in str(exc).upper():
-            raise HTTPException(status_code=409, detail="该管理员账号已存在") from exc
+            raise HTTPException(status_code=409, detail="该账号已存在") from exc
         raise
+    _set_dataset_permissions(int(row["id"]), dataset_ids)
     return _public_admin(row)
+
+
+def update_admin(user_id: int, role: str, dataset_ids: list[int] | None = None) -> dict:
+    with connect() as conn:
+        row = conn.execute("SELECT is_initial_admin FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        if row["is_initial_admin"]:
+            role = "initial_admin"
+        else:
+            role = _normalize_role(role)
+        conn.execute("UPDATE admin_users SET role = ? WHERE id = ?", (role, user_id))
+    if not row["is_initial_admin"]:
+        _set_dataset_permissions(user_id, dataset_ids)
+    with connect() as conn:
+        updated = conn.execute(
+            "SELECT id, username, role, is_initial_admin, created_by, created_at FROM admin_users WHERE id = ?",
+            (user_id,),
+        ).fetchone()
+    return _public_admin(updated)
+
+
+def delete_admin(user_id: int, actor_id: int) -> None:
+    if user_id == actor_id:
+        raise HTTPException(status_code=400, detail="不能删除当前登录账号")
+    with connect() as conn:
+        row = conn.execute("SELECT is_initial_admin FROM admin_users WHERE id = ?", (user_id,)).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="用户不存在")
+        if row["is_initial_admin"]:
+            raise HTTPException(status_code=400, detail="不能删除初始管理员")
+        conn.execute("DELETE FROM admin_users WHERE id = ?", (user_id,))

@@ -1,8 +1,10 @@
-export type ViewName = 'overview' | 'analyst' | 'datasets' | 'knowledge' | 'accounts' | 'settings'
+export type ViewName = 'overview' | 'analyst' | 'datasets' | 'knowledge' | 'accounts' | 'audit' | 'settings'
 
 export interface AdminUser {
   id: number
   username: string
+  role: 'initial_admin' | 'admin' | 'data_analyst' | 'business_user'
+  dataset_permissions: number[]
   is_initial_admin: boolean
   created_by: number | null
   created_at: string
@@ -28,6 +30,16 @@ export interface DatasetColumn {
   description: string
   sample_value: string | null
   null_rate: number
+}
+
+export interface DatasetQuality {
+  dataset_id: number
+  row_count: number
+  column_count: number
+  duplicate_rows: number
+  missing: Array<{ column: string; missing_count: number; missing_rate: number }>
+  outliers: Array<{ column: string; outlier_count: number }>
+  summary: string[]
 }
 
 export interface KnowledgeItem {
@@ -104,4 +116,16 @@ export interface ConfigStatus {
   vector_store: string
   vector_indexed_count: number
   environment: string
+}
+
+export interface AuditLog {
+  id: number
+  user_id: number | null
+  username: string | null
+  action: string
+  resource_type: string
+  resource_id: string | null
+  detail: string
+  status: string
+  created_at: string
 }

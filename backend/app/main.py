@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 from .config import get_settings
 from .db import initialize_database
-from .routers import agent, auth, datasets, knowledge, system
+from .routers import agent, audit, auth, datasets, knowledge, system
 from .services.auth import SESSION_COOKIE, admin_from_session
 from .services.vector_store import VectorStoreError, sync_knowledge
 
@@ -68,6 +68,7 @@ app.include_router(datasets.router, prefix="/api/v1")
 app.include_router(knowledge.router, prefix="/api/v1")
 app.include_router(agent.router, prefix="/api/v1")
 app.include_router(auth.router, prefix="/api/v1")
+app.include_router(audit.router, prefix="/api/v1")
 
 
 @app.get("/")

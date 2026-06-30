@@ -298,7 +298,7 @@ def _python_rows(value: Any) -> list[dict[str, Any]]:
 def _apply_python_chart(chart: dict[str, Any], suggestion: Any) -> dict[str, Any]:
     if not isinstance(suggestion, dict):
         return chart
-    allowed_types = {"bar", "line", "pie", "scatter", "none"}
+    allowed_types = {"bar", "line", "pie", "scatter", "area", "radar", "none"}
     chart_type = str(suggestion.get("type") or chart["type"]).lower()
     if chart_type not in allowed_types:
         chart_type = chart["type"]
@@ -571,7 +571,13 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
     insights = await polish_insights(effective_question, rows, draft, knowledge)
     is_time = query_plan.x_field in ("日期", "月份")
-    if "柱状图" in effective_question:
+    if "雷达图" in effective_question or "radar" in effective_question.lower():
+        chart_type = "radar"
+    elif "面积图" in effective_question or "area" in effective_question.lower():
+        chart_type = "area"
+    elif "散点图" in effective_question or "scatter" in effective_question.lower():
+        chart_type = "scatter"
+    elif "柱状图" in effective_question:
         chart_type = "bar"
     elif "折线图" in effective_question:
         chart_type = "line"

@@ -87,6 +87,7 @@ async def _generate_python_code(
 要求：
 1. 数据已通过 pd.read_sql 读取到 DataFrame `df` 中（不需要你写 read_sql）
 2. 输出为 JSON 对象，包含 `summary`（字符串）、`data`（列表字典，最多 50 行）、`chart_suggestion`（可选）
+   chart_suggestion.type 可选：bar、line、pie、scatter、area、radar
 3. 使用 print(json.dumps(result, ensure_ascii=False, default=str)) 输出结果
 4. 不要使用 print 输出其他内容
 5. 只使用 pandas、numpy 及 Python 标准库

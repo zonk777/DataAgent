@@ -203,7 +203,36 @@ def build_chart_image(payload: dict[str, Any]) -> BytesIO | None:
         grouped.setdefault(s, {})[x] = grouped.setdefault(s, {}).get(x, 0) + _float_value(row.get(y_field))
     x_values = x_values[:28]
 
-    if chart_type == "pie":
+    if chart_type == "radar":
+        radar_labels = x_values[:8]
+        values = [value for group in grouped.values() for value in group.values()]
+        max_value = max(values) if values else 1
+        center_x, center_y, radius = 550, 270, 165
+        for ring in range(1, 6):
+            pts = []
+            current_r = radius * ring / 5
+            for idx in range(len(radar_labels)):
+                angle = -math.pi / 2 + 2 * math.pi * idx / max(len(radar_labels), 1)
+                pts.append((center_x + current_r * math.cos(angle), center_y + current_r * math.sin(angle)))
+            if len(pts) > 2:
+                draw.polygon(pts, outline=grid_color)
+        for idx, label in enumerate(radar_labels):
+            angle = -math.pi / 2 + 2 * math.pi * idx / max(len(radar_labels), 1)
+            end = (center_x + radius * math.cos(angle), center_y + radius * math.sin(angle))
+            draw.line((center_x, center_y, end[0], end[1]), fill=grid_color, width=1)
+            draw.text((end[0] - 35, end[1] - 10), label[:8], font=small_font, fill=(93, 111, 132))
+        for s_idx, (series, data) in enumerate(list(grouped.items())[:6]):
+            pts = []
+            for idx, label in enumerate(radar_labels):
+                angle = -math.pi / 2 + 2 * math.pi * idx / max(len(radar_labels), 1)
+                current_r = radius * (data.get(label, 0) / max(max_value, 1))
+                pts.append((center_x + current_r * math.cos(angle), center_y + current_r * math.sin(angle)))
+            if len(pts) > 2:
+                draw.line(pts + [pts[0]], fill=colorset[s_idx % len(colorset)], width=4)
+            lx = 82 + s_idx * 150
+            draw.rectangle((lx, 452, lx + 18, 470), fill=colorset[s_idx % len(colorset)])
+            draw.text((lx + 26, 448), series[:10], font=small_font, fill=(70, 88, 112))
+    elif chart_type == "pie":
         totals = [(x, sum(group.get(x, 0) for group in grouped.values())) for x in x_values[:10]]
         total = sum(value for _, value in totals) or 1
         bbox = (165, 120, 475, 430)
@@ -228,17 +257,20 @@ def build_chart_image(payload: dict[str, Any]) -> BytesIO | None:
             draw.text((10, y - 10), f"{label:,.0f}", font=small_font, fill=(112, 129, 151))
         draw.line((x1, y2, x2, y2), fill=axis_color, width=2)
         draw.line((x1, y1, x1, y2), fill=axis_color, width=2)
-        if chart_type == "line":
+        if chart_type in ("line", "area", "scatter"):
             for s_idx, (series, data) in enumerate(list(grouped.items())[:6]):
                 pts = []
                 for idx, x in enumerate(x_values):
                     px = x1 + int((x2 - x1) * idx / max(len(x_values) - 1, 1))
                     py = y2 - int((data.get(x, 0) - min_value) / span * (y2 - y1))
                     pts.append((px, py))
-                if len(pts) > 1:
+                if chart_type == "area" and len(pts) > 1:
+                    draw.polygon([*pts, (pts[-1][0], y2), (pts[0][0], y2)], fill=(230, 242, 255))
+                if chart_type in ("line", "area") and len(pts) > 1:
                     draw.line(pts, fill=colorset[s_idx % len(colorset)], width=4)
                 for px, py in pts:
-                    draw.ellipse((px - 4, py - 4, px + 4, py + 4), fill=colorset[s_idx % len(colorset)])
+                    dot = 6 if chart_type == "scatter" else 4
+                    draw.ellipse((px - dot, py - dot, px + dot, py + dot), fill=colorset[s_idx % len(colorset)])
         else:
             totals = [(x, sum(group.get(x, 0) for group in grouped.values())) for x in x_values]
             bar_w = max(10, int((x2 - x1) / max(len(totals), 1) * 0.62))

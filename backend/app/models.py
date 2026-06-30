@@ -92,7 +92,7 @@ class AdminUpdate(BaseModel):
 
 
 class ChartSpec(BaseModel):
-    type: Literal["bar", "line", "pie", "scatter", "none"] = "none"
+    type: Literal["bar", "line", "pie", "scatter", "area", "radar", "none"] = "none"
     title: str
     x_field: str | None = None
     y_field: str | None = None

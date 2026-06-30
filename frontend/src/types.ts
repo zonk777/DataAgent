@@ -88,7 +88,7 @@ export interface AnalysisResult {
   columns: string[]
   rows: Record<string, string | number | null>[]
   chart: {
-    type: 'bar' | 'line' | 'pie' | 'scatter' | 'none'
+    type: 'bar' | 'line' | 'pie' | 'scatter' | 'area' | 'radar' | 'none'
     title: string
     x_field: string | null
     y_field: string | null

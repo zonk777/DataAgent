@@ -6,6 +6,7 @@ import uuid
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from ..config import get_settings
@@ -233,6 +234,8 @@ def _series_label(row: dict[str, Any], series_fields: list[str]) -> str:
 def _jsonable_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
+    if isinstance(value, Decimal):
+        return float(value)
     return value
 
 
@@ -355,6 +358,16 @@ async def _execute_sql_with_repair(
             with connect() as conn:
                 result = conn.execute(safe_sql, candidate_params).fetchall()
                 rows = [_jsonable_row(dict(row)) for row in result]
+            if rows and query_plan.y_field and query_plan.y_field not in rows[0]:
+                raise ValueError(
+                    f"LLM 生成的 SQL 缺少期望的指标列 \"{query_plan.y_field}\"，"
+                    f"实际列: {list(rows[0].keys())[:8]}"
+                )
+            if rows and query_plan.x_field and query_plan.x_field not in rows[0]:
+                raise ValueError(
+                    f"LLM 生成的 SQL 缺少期望的维度列 \"{query_plan.x_field}\"，"
+                    f"实际列: {list(rows[0].keys())[:8]}"
+                )
             attempts.append(
                 {
                     "attempt": attempt_no,

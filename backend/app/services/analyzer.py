@@ -11,6 +11,7 @@ from typing import Any
 from ..config import get_settings
 from ..db import connect, using_mysql
 from .intent_classifier import IntentResult, classify_intent
+from .chart_recommender import recommend_chart
 from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, polish_insights
 from .planner import build_plan_steps, plan_titles
@@ -308,6 +309,17 @@ def _apply_python_chart(chart: dict[str, Any], suggestion: Any) -> dict[str, Any
     updated["y_field"] = suggestion.get("y") or suggestion.get("y_field") or chart.get("y_field")
     updated["series_field"] = suggestion.get("series") or suggestion.get("series_field") or chart.get("series_field")
     updated["series_name"] = updated["y_field"]
+    updated["recommendation"] = {
+        "type": chart_type,
+        "source": "python_suggestion",
+        "reason": suggestion.get("reason") or "Python/Pandas 分析脚本返回了 chart_suggestion",
+        "confidence": suggestion.get("confidence") or 0.86,
+        "alternatives": chart.get("alternatives", []),
+        "display_mode": chart.get("display_mode", "single"),
+        "secondary_y_field": chart.get("secondary_y_field"),
+        "facet_fields": chart.get("facet_fields", []),
+        "distribution": (chart.get("recommendation") or {}).get("distribution", {}),
+    }
     return updated
 
 
@@ -570,21 +582,15 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
     knowledge = await search_knowledge(effective_question, dataset_id)
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
     insights = await polish_insights(effective_question, rows, draft, knowledge)
-    is_time = query_plan.x_field in ("日期", "月份")
-    if "雷达图" in effective_question or "radar" in effective_question.lower():
-        chart_type = "radar"
-    elif "面积图" in effective_question or "area" in effective_question.lower():
-        chart_type = "area"
-    elif "散点图" in effective_question or "scatter" in effective_question.lower():
-        chart_type = "scatter"
-    elif "柱状图" in effective_question:
-        chart_type = "bar"
-    elif "折线图" in effective_question:
-        chart_type = "line"
-    elif "饼图" in effective_question:
-        chart_type = "pie"
-    else:
-        chart_type = "line" if is_time else ("pie" if "占比" in effective_question and len(rows) <= 8 else "bar")
+    chart_recommendation = recommend_chart(
+        effective_question,
+        intent_result.label,
+        rows,
+        query_plan.x_field,
+        query_plan.y_field,
+        query_plan.series_fields,
+    )
+    chart_type = chart_recommendation["type"]
     intent = intent_result.display_name
     scope_parts = [item for item in (query_plan.time_description, *query_plan.series_fields) if item]
     scope = "、".join(scope_parts) or query_plan.x_field
@@ -597,6 +603,11 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
         "series_name": query_plan.y_field,
         "series_field": query_plan.series_field,
         "series_fields": query_plan.series_fields,
+        "recommendation": chart_recommendation,
+        "alternatives": chart_recommendation.get("alternatives", []),
+        "display_mode": chart_recommendation.get("display_mode", "single"),
+        "secondary_y_field": chart_recommendation.get("secondary_y_field"),
+        "facet_fields": chart_recommendation.get("facet_fields", []),
     }
     python_analysis: dict[str, Any] | None = None
     python_code: str | None = None

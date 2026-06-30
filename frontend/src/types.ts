@@ -95,6 +95,21 @@ export interface AnalysisResult {
     series_name: string | null
     series_field: string | null
     series_fields?: string[]
+    recommendation?: {
+      type: 'bar' | 'line' | 'pie' | 'scatter' | 'area' | 'radar' | 'none'
+      source: string
+      reason: string
+      confidence?: number
+      alternatives?: string[]
+      display_mode?: 'single' | 'dual_axis' | 'facet'
+      secondary_y_field?: string | null
+      facet_fields?: string[]
+      distribution?: Record<string, unknown>
+    } | null
+    alternatives?: Array<'bar' | 'line' | 'pie' | 'scatter' | 'area' | 'radar'>
+    display_mode?: 'single' | 'dual_axis' | 'facet'
+    secondary_y_field?: string | null
+    facet_fields?: string[]
   }
   insights: string[]
   knowledge_refs: KnowledgeItem[]

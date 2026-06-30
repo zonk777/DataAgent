@@ -99,6 +99,11 @@ class ChartSpec(BaseModel):
     series_name: str | None = None
     series_field: str | None = None
     series_fields: list[str] = Field(default_factory=list)
+    recommendation: dict[str, Any] | None = None
+    alternatives: list[str] = Field(default_factory=list)
+    display_mode: Literal["single", "dual_axis", "facet"] = "single"
+    secondary_y_field: str | None = None
+    facet_fields: list[str] = Field(default_factory=list)
 
 
 class PlanStepSpec(BaseModel):

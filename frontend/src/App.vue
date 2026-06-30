@@ -648,6 +648,7 @@ onMounted(bootstrap)
         <div class="settings-grid">
           <article class="panel setting-card"><div class="setting-head"><span class="metric-icon blue"><AppIcon name="spark" /></span><div><h3>大语言模型</h3><p>OpenAI 兼容接口</p></div><em :class="{ ready: config?.llm_configured }">{{ config?.llm_configured ? '已配置' : '待配置' }}</em></div><dl><div><dt>模型</dt><dd>{{ config?.llm_model || '未设置' }}</dd></div><div><dt>API Key</dt><dd>仅后端可见</dd></div></dl></article>
           <article class="panel setting-card"><div class="setting-head"><span class="metric-icon cyan"><AppIcon name="book" /></span><div><h3>Embedding / RAG</h3><p>语义向量检索</p></div><em :class="{ ready: config?.embedding_configured }">{{ config?.embedding_configured ? '已启用' : '关键词降级' }}</em></div><dl><div><dt>Embedding 模型</dt><dd>{{ config?.embedding_model || '未配置' }}</dd></div><div><dt>向量存储</dt><dd>{{ config?.vector_store }}</dd></div><div><dt>已索引知识</dt><dd>{{ config?.vector_indexed_count ?? 0 }} 条</dd></div></dl></article>
+          <article class="panel setting-card"><div class="setting-head"><span class="metric-icon green"><AppIcon name="database" /></span><div><h3>主数据库</h3><p>系统业务数据存储</p></div><em class="ready">{{ config?.database_backend?.toUpperCase() || 'MYSQL' }}</em></div><dl><div><dt>数据库</dt><dd>{{ config?.database_name || 'dataagent' }}</dd></div><div><dt>用途</dt><dd>账号、数据源、会话、审计日志</dd></div></dl></article>
         </div>
       </section>
     </main>

@@ -17,7 +17,13 @@ class Settings(BaseSettings):
     app_name: str = "DataAgent"
     environment: str = "development"
     secret_key: str = "development-only-change-me"
+    database_backend: str = "mysql"
     database_path: str = "storage/data_agent.db"
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = "dataagent"
+    mysql_password: str = "dataagent123"
+    mysql_database: str = "dataagent"
     frontend_origin: str = "http://localhost:5173"
 
     llm_api_key: str = ""

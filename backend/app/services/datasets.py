@@ -10,7 +10,7 @@ import pandas as pd
 from fastapi import UploadFile
 
 from ..config import get_settings
-from ..db import connect
+from ..db import connect, using_mysql
 from .security import safe_identifier
 
 
@@ -18,7 +18,30 @@ NUMERIC_TYPE_TOKENS = ("int", "float", "double", "decimal", "real", "numeric", "
 
 
 def _quote_identifier(name: str) -> str:
+    if using_mysql():
+        return "`" + name.replace("`", "``") + "`"
     return '"' + name.replace('"', '""') + '"'
+
+
+def _sql_type(dtype: Any) -> str:
+    text = str(dtype).lower()
+    if "int" in text:
+        return "BIGINT" if using_mysql() else "INTEGER"
+    if any(token in text for token in ("float", "double", "decimal")):
+        return "DOUBLE" if using_mysql() else "REAL"
+    if "bool" in text:
+        return "TINYINT" if using_mysql() else "INTEGER"
+    if "datetime" in text or "date" in text:
+        return "DATETIME" if using_mysql() else "TEXT"
+    return "TEXT"
+
+
+def _clean_value(value: Any) -> Any:
+    if pd.isna(value):
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value.item() if hasattr(value, "item") else value
 
 
 def _read_file_frame(filename: str | None, content: bytes) -> pd.DataFrame:
@@ -65,7 +88,14 @@ def _store_frame(
 ) -> dict:
     table_name = f"data_{uuid.uuid4().hex[:12]}"
     with connect() as conn:
-        frame.to_sql(table_name, conn, index=False, if_exists="fail")
+        column_defs = ", ".join(f"{_quote_identifier(column)} {_sql_type(frame[column].dtype)}" for column in frame.columns)
+        engine = " ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci" if using_mysql() else ""
+        conn.execute(f"CREATE TABLE {_quote_identifier(table_name)} ({column_defs}){engine}")
+        if len(frame):
+            columns_sql = ", ".join(_quote_identifier(column) for column in frame.columns)
+            placeholders = ", ".join("?" for _ in frame.columns)
+            values = [tuple(_clean_value(value) for value in row) for row in frame.itertuples(index=False, name=None)]
+            conn.executemany(f"INSERT INTO {_quote_identifier(table_name)} ({columns_sql}) VALUES ({placeholders})", values)
         cursor = conn.execute(
             """INSERT INTO datasets(name, description, source_type, table_name, row_count, column_count)
                VALUES (?, ?, ?, ?, ?, ?)""",
@@ -160,7 +190,7 @@ def get_dataset(dataset_id: int) -> dict:
                 (dataset_id,),
             ).fetchall()
         ]
-        preview = conn.execute(f"SELECT * FROM {result['table_name']} LIMIT 100").fetchall()
+        preview = conn.execute(f"SELECT * FROM {_quote_identifier(result['table_name'])} LIMIT 100").fetchall()
         result["preview"] = [dict(item) for item in preview]
         return result
 
@@ -198,7 +228,7 @@ def delete_dataset(dataset_id: int) -> None:
         if not row:
             raise ValueError("数据集不存在")
         table_name = row["table_name"]
-        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
+        conn.execute(f"DROP TABLE IF EXISTS {_quote_identifier(table_name)}")
         conn.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
 
 
@@ -207,14 +237,14 @@ def dataset_quality(dataset_id: int) -> dict[str, Any]:
     columns = dataset.get("columns", [])
     table_name = dataset["table_name"]
     with connect() as conn:
-        row_count = int(conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0])
+        row_count = int(conn.execute(f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}").fetchone()[0])
         missing = []
         for column in columns:
             name = column["name"]
             quoted_name = _quote_identifier(name)
             missing_count = int(
                 conn.execute(
-                    f"SELECT COUNT(*) FROM {table_name} WHERE {quoted_name} IS NULL OR TRIM(CAST({quoted_name} AS TEXT)) = ''"
+                    f"SELECT COUNT(*) FROM {_quote_identifier(table_name)} WHERE {quoted_name} IS NULL OR TRIM(CAST({quoted_name} AS CHAR)) = ''"
                 ).fetchone()[0]
             )
             missing.append(
@@ -227,12 +257,13 @@ def dataset_quality(dataset_id: int) -> dict[str, Any]:
         if columns:
             group_columns = ", ".join(_quote_identifier(column["name"]) for column in columns)
             duplicate_row = conn.execute(
-                f"SELECT COALESCE(SUM(cnt - 1), 0) FROM (SELECT COUNT(*) AS cnt FROM {table_name} GROUP BY {group_columns} HAVING cnt > 1)"
+                f"SELECT COALESCE(SUM(cnt - 1), 0) FROM (SELECT COUNT(*) AS cnt FROM {_quote_identifier(table_name)} GROUP BY {group_columns} HAVING cnt > 1) t"
             ).fetchone()
             duplicate_rows = int(duplicate_row[0] or 0)
         else:
             duplicate_rows = 0
-        frame = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
+        rows = conn.execute(f"SELECT * FROM {_quote_identifier(table_name)}").fetchall()
+        frame = pd.DataFrame([dict(row) for row in rows])
 
     outliers = []
     for column in columns:

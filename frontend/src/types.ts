@@ -115,6 +115,8 @@ export interface ConfigStatus {
   embedding_model: string | null
   vector_store: string
   vector_indexed_count: number
+  database_backend: string
+  database_name: string
   environment: string
 }
 

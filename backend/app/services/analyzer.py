@@ -5,10 +5,11 @@ import re
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any
 
 from ..config import get_settings
-from ..db import connect
+from ..db import connect, using_mysql
 from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, polish_insights
 from .security import validate_readonly_sql
@@ -114,6 +115,22 @@ def _time_filter(question: str, date_column: str | None, table_name: str) -> tup
     if not date_column:
         return [], [], None
     match = re.search(r"(?:近|最近)\s*(\d+)\s*(天|日|周|个月|月)", question)
+    if using_mysql():
+        max_date = f"(SELECT MAX(DATE({date_column})) FROM {table_name})"
+        if match:
+            amount = max(1, int(match.group(1)))
+            unit = match.group(2)
+            if unit in ("天", "日"):
+                return [f"DATE({date_column}) >= DATE_SUB({max_date}, INTERVAL ? DAY)"], [amount - 1], f"近{amount}天"
+            if unit == "周":
+                return [f"DATE({date_column}) >= DATE_SUB({max_date}, INTERVAL ? DAY)"], [amount * 7 - 1], f"近{amount}周"
+            return [f"DATE({date_column}) >= DATE_SUB(DATE_FORMAT({max_date}, '%%Y-%%m-01'), INTERVAL ? MONTH)"], [amount - 1], f"近{amount}个月"
+        if "本月" in question:
+            return [f"DATE({date_column}) >= DATE_FORMAT({max_date}, '%%Y-%%m-01')"], [], "本月"
+        if "今年" in question or "本年" in question:
+            return [f"YEAR({date_column}) = YEAR({max_date})"], [], "本年"
+        return [], [], None
+
     max_date = f"(SELECT MAX(date({date_column})) FROM {table_name})"
     if match:
         amount = max(1, int(match.group(1)))
@@ -164,9 +181,9 @@ def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
     )
     if is_time_series:
         if is_monthly:
-            x_sql, x_field = f"strftime('%Y-%m', {profile['date']})", "月份"
+            x_sql, x_field = (f"DATE_FORMAT({profile['date']}, '%%Y-%%m')" if using_mysql() else f"strftime('%Y-%m', {profile['date']})"), "月份"
         else:
-            x_sql, x_field = f"date({profile['date']})", "日期"
+            x_sql, x_field = (f"DATE({profile['date']})" if using_mysql() else f"date({profile['date']})"), "日期"
         series_dimensions = breakdowns
     else:
         if breakdowns:
@@ -206,6 +223,16 @@ def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
 
 def _series_label(row: dict[str, Any], series_fields: list[str]) -> str:
     return " / ".join(str(row.get(field) or "未分类") for field in series_fields)
+
+
+def _jsonable_value(value: Any) -> Any:
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return value
+
+
+def _jsonable_row(row: dict[str, Any]) -> dict[str, Any]:
+    return {key: _jsonable_value(value) for key, value in row.items()}
 
 
 def _draft_insights(rows: list[dict[str, Any]], x_field: str, y_field: str, series_fields: list[str]) -> list[str]:
@@ -395,7 +422,7 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
     safe_sql = validate_readonly_sql(query_plan.sql, dataset["table_name"])
     with connect() as conn:
         result = conn.execute(safe_sql, query_plan.params).fetchall()
-        rows = [dict(row) for row in result]
+        rows = [_jsonable_row(dict(row)) for row in result]
 
     knowledge = await search_knowledge(effective_question, dataset_id)
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)

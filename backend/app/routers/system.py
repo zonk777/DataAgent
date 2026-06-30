@@ -24,6 +24,8 @@ def config_status() -> dict:
         "embedding_model": settings.embedding_model if settings.embedding_configured else None,
         "vector_store": vectors["store"],
         "vector_indexed_count": vectors["indexed_count"],
+        "database_backend": settings.database_backend,
+        "database_name": settings.mysql_database if settings.database_backend.lower() == "mysql" else str(settings.database_file),
         "environment": settings.environment,
     }
 

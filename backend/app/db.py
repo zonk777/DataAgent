@@ -5,12 +5,15 @@ import random
 import sqlite3
 from contextlib import contextmanager
 from datetime import date, timedelta
-from typing import Iterator
+from typing import Any, Iterator
+
+import pymysql
+from pymysql.cursors import DictCursor
 
 from .config import get_settings
 
 
-SCHEMA = """
+SCHEMA_SQLITE = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
@@ -50,6 +53,7 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     dataset_id INTEGER REFERENCES datasets(id) ON DELETE SET NULL,
+    user_id INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -100,46 +104,256 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
 """
 
 
+SCHEMA_MYSQL = [
+    """
+    CREATE TABLE IF NOT EXISTS datasets (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL,
+        source_type VARCHAR(64) NOT NULL,
+        table_name VARCHAR(128) NOT NULL UNIQUE,
+        row_count INT NOT NULL DEFAULT 0,
+        column_count INT NOT NULL DEFAULT 0,
+        status VARCHAR(32) NOT NULL DEFAULT 'ready',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS dataset_columns (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        dataset_id INT NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        data_type VARCHAR(128) NOT NULL,
+        description TEXT NOT NULL,
+        sample_value TEXT,
+        null_rate DOUBLE NOT NULL DEFAULT 0,
+        UNIQUE KEY uq_dataset_column (dataset_id, name),
+        CONSTRAINT fk_dataset_columns_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS knowledge_chunks (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        content LONGTEXT NOT NULL,
+        category VARCHAR(64) NOT NULL DEFAULT 'business_rule',
+        dataset_id INT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_knowledge_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id VARCHAR(64) PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        dataset_id INT NULL,
+        user_id INT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_sessions_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_id VARCHAR(64) NOT NULL,
+        role VARCHAR(16) NOT NULL,
+        content LONGTEXT NOT NULL,
+        payload LONGTEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_messages_session_id (session_id),
+        CONSTRAINT fk_messages_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT NULL,
+        username VARCHAR(255),
+        action VARCHAR(128) NOT NULL,
+        resource_type VARCHAR(128) NOT NULL,
+        resource_id VARCHAR(255),
+        detail TEXT NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'success',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        INDEX idx_audit_action (action),
+        INDEX idx_audit_username (username),
+        INDEX idx_audit_created_at (created_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(255) NOT NULL UNIQUE,
+        password_hash VARCHAR(512) NOT NULL,
+        role VARCHAR(64) NOT NULL DEFAULT 'admin',
+        is_initial_admin TINYINT(1) NOT NULL DEFAULT 0,
+        created_by INT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_admin_created_by FOREIGN KEY (created_by) REFERENCES admin_users(id) ON DELETE SET NULL
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS user_dataset_permissions (
+        user_id INT NOT NULL,
+        dataset_id INT NOT NULL,
+        PRIMARY KEY(user_id, dataset_id),
+        CONSTRAINT fk_permission_user FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
+        CONSTRAINT fk_permission_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS admin_sessions (
+        token VARCHAR(128) PRIMARY KEY,
+        admin_id INT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at VARCHAR(64) NOT NULL,
+        CONSTRAINT fk_admin_sessions_user FOREIGN KEY (admin_id) REFERENCES admin_users(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+]
+
+
+class Row(dict):
+    """Dict row that also supports integer indexes like sqlite3.Row."""
+
+    def __init__(self, data: dict[str, Any], order: list[str] | None = None) -> None:
+        super().__init__(data)
+        self._order = order or list(data.keys())
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, int):
+            return super().__getitem__(self._order[key])
+        return super().__getitem__(key)
+
+
+class MySQLCursor:
+    def __init__(self, cursor) -> None:
+        self._cursor = cursor
+        self._order: list[str] = []
+
+    @property
+    def lastrowid(self) -> int:
+        return int(self._cursor.lastrowid or 0)
+
+    def fetchone(self) -> Row | None:
+        row = self._cursor.fetchone()
+        return Row(row, self._order) if row is not None else None
+
+    def fetchall(self) -> list[Row]:
+        return [Row(row, self._order) for row in self._cursor.fetchall()]
+
+    def __iter__(self):
+        return iter(self.fetchall())
+
+
+class MySQLConnection:
+    def __init__(self, conn) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params: tuple | list | None = None) -> MySQLCursor:
+        sql = _mysql_sql(sql)
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params if params else None)
+        wrapped = MySQLCursor(cursor)
+        wrapped._order = [item[0] for item in (cursor.description or [])]
+        return wrapped
+
+    def executemany(self, sql: str, params: list[tuple] | tuple[tuple, ...]) -> MySQLCursor:
+        sql = _mysql_sql(sql)
+        cursor = self._conn.cursor()
+        cursor.executemany(sql, params)
+        wrapped = MySQLCursor(cursor)
+        wrapped._order = [item[0] for item in (cursor.description or [])]
+        return wrapped
+
+    def executescript(self, script: str) -> None:
+        for statement in _split_sql_script(script):
+            self.execute(statement)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        self._conn.rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+
+def _split_sql_script(script: str) -> list[str]:
+    return [statement.strip() for statement in script.split(";") if statement.strip() and not statement.strip().startswith("PRAGMA")]
+
+
+def _mysql_sql(sql: str) -> str:
+    sql = sql.strip()
+    sql = sql.replace("INSERT OR IGNORE INTO", "INSERT IGNORE INTO")
+    return sql.replace("?", "%s")
+
+
+def using_mysql() -> bool:
+    return get_settings().database_backend.lower() == "mysql"
+
+
 @contextmanager
-def connect() -> Iterator[sqlite3.Connection]:
+def connect() -> Iterator[Any]:
     settings = get_settings()
-    settings.database_file.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.database_file, timeout=settings.sql_timeout_seconds)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
+    if settings.database_backend.lower() == "mysql":
+        conn = pymysql.connect(
+            host=settings.mysql_host,
+            port=settings.mysql_port,
+            user=settings.mysql_user,
+            password=settings.mysql_password,
+            database=settings.mysql_database,
+            charset="utf8mb4",
+            cursorclass=DictCursor,
+            autocommit=False,
+            connect_timeout=settings.sql_timeout_seconds,
+            read_timeout=settings.sql_timeout_seconds,
+            write_timeout=settings.sql_timeout_seconds,
+        )
+        db = MySQLConnection(conn)
+    else:
+        settings.database_file.parent.mkdir(parents=True, exist_ok=True)
+        db = sqlite3.connect(settings.database_file, timeout=settings.sql_timeout_seconds)
+        db.row_factory = sqlite3.Row
+        db.execute("PRAGMA foreign_keys=ON")
     try:
-        yield conn
-        conn.commit()
+        yield db
+        db.commit()
     except Exception:
-        conn.rollback()
+        db.rollback()
         raise
     finally:
-        conn.close()
+        db.close()
 
 
 def initialize_database() -> None:
     with connect() as conn:
-        conn.executescript(SCHEMA)
-        _migrate_schema(conn)
+        if using_mysql():
+            for statement in SCHEMA_MYSQL:
+                conn.execute(statement)
+        else:
+            conn.executescript(SCHEMA_SQLITE)
+            _migrate_sqlite_schema(conn)
         _seed_initial_admin(conn)
         exists = conn.execute("SELECT id FROM datasets LIMIT 1").fetchone()
         if not exists:
             _seed_demo_dataset(conn)
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+def _has_sqlite_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Apply lightweight SQLite migrations for existing local development databases."""
-    if not _has_column(conn, "admin_users", "role"):
+def _migrate_sqlite_schema(conn: sqlite3.Connection) -> None:
+    if not _has_sqlite_column(conn, "admin_users", "role"):
         conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
-    if not _has_column(conn, "audit_logs", "user_id"):
+    if not _has_sqlite_column(conn, "audit_logs", "user_id"):
         conn.execute("ALTER TABLE audit_logs ADD COLUMN user_id INTEGER")
-    if not _has_column(conn, "audit_logs", "username"):
+    if not _has_sqlite_column(conn, "audit_logs", "username"):
         conn.execute("ALTER TABLE audit_logs ADD COLUMN username TEXT")
-    if not _has_column(conn, "sessions", "user_id"):
+    if not _has_sqlite_column(conn, "sessions", "user_id"):
         conn.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS user_dataset_permissions (
@@ -152,7 +366,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     conn.execute("UPDATE admin_users SET role = 'admin' WHERE role IS NULL OR role = ''")
 
 
-def _seed_initial_admin(conn: sqlite3.Connection) -> None:
+def _seed_initial_admin(conn: Any) -> None:
     exists = conn.execute("SELECT id FROM admin_users WHERE username = ?", ("liuze",)).fetchone()
     if exists:
         return
@@ -164,22 +378,38 @@ def _seed_initial_admin(conn: sqlite3.Connection) -> None:
     )
 
 
-def _seed_demo_dataset(conn: sqlite3.Connection) -> None:
+def _seed_demo_dataset(conn: Any) -> None:
     table_name = "data_demo_sales"
-    conn.execute(
-        f"""CREATE TABLE {table_name} (
-            order_date TEXT NOT NULL,
-            region TEXT NOT NULL,
-            product_category TEXT NOT NULL,
-            channel TEXT NOT NULL,
-            sales_amount REAL NOT NULL,
-            order_count INTEGER NOT NULL,
-            profit REAL NOT NULL,
-            complaint_count INTEGER NOT NULL,
-            visits INTEGER NOT NULL,
-            conversions INTEGER NOT NULL
-        )"""
-    )
+    if using_mysql():
+        conn.execute(
+            f"""CREATE TABLE IF NOT EXISTS {table_name} (
+                order_date VARCHAR(32) NOT NULL,
+                region VARCHAR(64) NOT NULL,
+                product_category VARCHAR(128) NOT NULL,
+                channel VARCHAR(128) NOT NULL,
+                sales_amount DOUBLE NOT NULL,
+                order_count INT NOT NULL,
+                profit DOUBLE NOT NULL,
+                complaint_count INT NOT NULL,
+                visits INT NOT NULL,
+                conversions INT NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"""
+        )
+    else:
+        conn.execute(
+            f"""CREATE TABLE {table_name} (
+                order_date TEXT NOT NULL,
+                region TEXT NOT NULL,
+                product_category TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                sales_amount REAL NOT NULL,
+                order_count INTEGER NOT NULL,
+                profit REAL NOT NULL,
+                complaint_count INTEGER NOT NULL,
+                visits INTEGER NOT NULL,
+                conversions INTEGER NOT NULL
+            )"""
+        )
 
     rng = random.Random(20250622)
     regions = ["华东", "华南", "华北", "西南"]

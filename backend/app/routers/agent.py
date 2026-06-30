@@ -1,5 +1,4 @@
 import json
-import sqlite3
 import uuid
 from urllib.parse import quote
 
@@ -105,7 +104,7 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
         result = await analyze(payload.question, payload.session_id, dataset_id)
         log_action("analysis_request", "session", result.get("session_id"), payload.question, actor=actor)
         return result
-    except (ValueError, sqlite3.Error) as exc:
+    except Exception as exc:
         log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

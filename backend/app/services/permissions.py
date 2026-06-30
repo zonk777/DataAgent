@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from fastapi import HTTPException, Request, status
@@ -76,3 +77,36 @@ def require_data_manager(request: Request) -> dict[str, Any]:
     if actor.get("role") not in DATA_MANAGER_ROLES and not actor.get("is_initial_admin"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="当前账号无数据源/知识库管理权限")
     return actor
+
+
+def get_column_mask(user_id: int, dataset_id: int) -> list[str] | None:
+    """Get allowed columns for a user on a dataset. None = all columns allowed."""
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT column_mask FROM user_dataset_permissions WHERE user_id = ? AND dataset_id = ?",
+            (user_id, dataset_id),
+        ).fetchone()
+    if not row or not row.get("column_mask"):
+        return None
+    try:
+        mask = json.loads(row["column_mask"]) if isinstance(row["column_mask"], str) else row["column_mask"]
+        return mask if isinstance(mask, list) else None
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
+def set_column_mask(user_id: int, dataset_id: int, columns: list[str]) -> None:
+    """Set allowed columns mask for a user on a dataset."""
+    with connect() as conn:
+        conn.execute(
+            "UPDATE user_dataset_permissions SET column_mask = ? WHERE user_id = ? AND dataset_id = ?",
+            (json.dumps(columns), user_id, dataset_id),
+        )
+
+
+def filter_allowed_columns(columns: list[str], mask: list[str] | None) -> list[str]:
+    """Filter column list to only those in the mask. None mask = all allowed."""
+    if mask is None:
+        return columns
+    allowed = set(mask)
+    return [c for c in columns if c in allowed]

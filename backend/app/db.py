@@ -8,6 +8,9 @@ from datetime import date, timedelta
 from urllib.parse import quote_plus
 from typing import Any, Iterator
 
+import queue
+import threading
+
 import pymysql
 from pymysql.cursors import DictCursor
 
@@ -93,7 +96,19 @@ CREATE TABLE IF NOT EXISTS admin_users (
 CREATE TABLE IF NOT EXISTS user_dataset_permissions (
     user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
     dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    column_mask TEXT,
     PRIMARY KEY(user_id, dataset_id)
+);
+
+CREATE TABLE IF NOT EXISTS data_lineage (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+    column_name TEXT NOT NULL,
+    source_table TEXT,
+    source_column TEXT,
+    transformation TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(dataset_id, column_name)
 );
 
 CREATE TABLE IF NOT EXISTS admin_sessions (
@@ -198,9 +213,23 @@ SCHEMA_MYSQL = [
     CREATE TABLE IF NOT EXISTS user_dataset_permissions (
         user_id INT NOT NULL,
         dataset_id INT NOT NULL,
+        column_mask JSON,
         PRIMARY KEY(user_id, dataset_id),
         CONSTRAINT fk_permission_user FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
         CONSTRAINT fk_permission_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS data_lineage (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        dataset_id INT NOT NULL,
+        column_name VARCHAR(128) NOT NULL,
+        source_table VARCHAR(255),
+        source_column VARCHAR(255),
+        transformation TEXT,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        UNIQUE KEY uk_lineage (dataset_id, column_name),
+        CONSTRAINT fk_lineage_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     """,
     """
@@ -343,24 +372,69 @@ def _engine():
     return create_engine(url)
 
 
+_mysql_pool: queue.Queue | None = None
+_pool_lock = threading.Lock()
+_POOL_SIZE = 10
+
+
+def _get_mysql_connection():
+    """Get a MySQL connection from the pool, or create a new one."""
+    global _mysql_pool
+    with _pool_lock:
+        if _mysql_pool is None:
+            _mysql_pool = queue.Queue(maxsize=_POOL_SIZE)
+    settings = get_settings()
+    try:
+        conn = _mysql_pool.get_nowait()
+        try:
+            conn.ping(reconnect=False)
+        except Exception:
+            conn.close()
+            conn = _create_mysql_conn(settings)
+        return conn
+    except queue.Empty:
+        return _create_mysql_conn(settings)
+
+
+def _return_mysql_connection(conn):
+    """Return a healthy connection to the pool."""
+    global _mysql_pool
+    try:
+        conn.ping(reconnect=False)
+        _mysql_pool.put_nowait(conn)
+    except Exception:
+        conn.close()
+        if _mysql_pool is not None:
+            try:
+                _mysql_pool.put_nowait(_create_mysql_conn(get_settings()))
+            except queue.Full:
+                pass
+
+
+def _create_mysql_conn(settings):
+    return pymysql.connect(
+        host=settings.mysql_host,
+        port=settings.mysql_port,
+        user=settings.mysql_user,
+        password=settings.mysql_password,
+        database=settings.mysql_database,
+        charset="utf8mb4",
+        cursorclass=DictCursor,
+        autocommit=False,
+        connect_timeout=settings.sql_timeout_seconds,
+        read_timeout=settings.sql_timeout_seconds,
+        write_timeout=settings.sql_timeout_seconds,
+    )
+
+
 @contextmanager
 def connect() -> Iterator[Any]:
     settings = get_settings()
+    mysql_conn = None
     if settings.database_backend.lower() == "mysql":
-        conn = pymysql.connect(
-            host=settings.mysql_host,
-            port=settings.mysql_port,
-            user=settings.mysql_user,
-            password=settings.mysql_password,
-            database=settings.mysql_database,
-            charset="utf8mb4",
-            cursorclass=DictCursor,
-            autocommit=False,
-            connect_timeout=settings.sql_timeout_seconds,
-            read_timeout=settings.sql_timeout_seconds,
-            write_timeout=settings.sql_timeout_seconds,
-        )
+        conn = _get_mysql_connection()
         db = MySQLConnection(conn)
+        mysql_conn = conn
     else:
         settings.database_file.parent.mkdir(parents=True, exist_ok=True)
         raw = sqlite3.connect(settings.database_file, timeout=settings.sql_timeout_seconds)
@@ -374,7 +448,10 @@ def connect() -> Iterator[Any]:
         db.rollback()
         raise
     finally:
-        db.close()
+        if mysql_conn is not None:
+            _return_mysql_connection(mysql_conn)
+        else:
+            db.close()
 
 
 def initialize_database() -> None:
@@ -404,11 +481,26 @@ def _migrate_sqlite_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE audit_logs ADD COLUMN username TEXT")
     if not _has_sqlite_column(conn, "sessions", "user_id"):
         conn.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER")
+    if not _has_sqlite_column(conn, "user_dataset_permissions", "column_mask"):
+        conn.execute("ALTER TABLE user_dataset_permissions ADD COLUMN column_mask TEXT")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS user_dataset_permissions (
             user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
             dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+            column_mask TEXT,
             PRIMARY KEY(user_id, dataset_id)
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE IF NOT EXISTS data_lineage (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
+            column_name TEXT NOT NULL,
+            source_table TEXT,
+            source_column TEXT,
+            transformation TEXT,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(dataset_id, column_name)
         )"""
     )
     conn.execute("UPDATE admin_users SET role = 'initial_admin' WHERE is_initial_admin = 1")

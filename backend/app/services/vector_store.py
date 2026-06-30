@@ -461,6 +461,76 @@ def _search_milvus(settings: Settings, question: str, vector: list[float], datas
     return results
 
 
+def _search_faiss(settings: Settings, question: str, vector: list[float], dataset_id: int | None, limit: int) -> list[dict[str, Any]]:
+    """FAISS local search — lightweight alternative to Qdrant."""
+    try:
+        import numpy as np
+        import faiss
+    except ImportError:
+        raise VectorStoreError("未安装 faiss-cpu，无法使用 FAISS 检索；请先执行 pip install faiss-cpu numpy") from None
+
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT id, title, content, category FROM knowledge_chunks" + (" WHERE dataset_id = ? OR dataset_id IS NULL" if dataset_id else "") + " ORDER BY id",
+            (dataset_id,) if dataset_id else (),
+        ).fetchall()
+
+    if not rows:
+        return []
+
+    chunks = [dict(row) for row in rows]
+    embeddings_path = settings.qdrant_directory / "faiss_embeddings.json"
+    chunk_ids: list[int] = []
+    stored_vectors: list[list[float]] | None = None
+
+    if embeddings_path.exists():
+        try:
+            cached = json.loads(embeddings_path.read_text(encoding="utf-8"))
+            stored_vectors = cached.get("vectors", [])
+            chunk_ids = cached.get("ids", [])
+        except (json.JSONDecodeError, KeyError):
+            stored_vectors = None
+
+    current_ids = [c["id"] for c in chunks]
+    if stored_vectors is None or chunk_ids != current_ids:
+        vecs = _embed_with_fallback([c["content"][:2000] for c in chunks], settings)
+        stored_vectors = vecs if vecs else None
+        if stored_vectors:
+            embeddings_path.parent.mkdir(parents=True, exist_ok=True)
+            embeddings_path.write_text(json.dumps({"ids": current_ids, "vectors": stored_vectors}), encoding="utf-8")
+
+    if not stored_vectors:
+        return _keyword_fallback_search(question, chunks, limit)
+
+    dim = len(stored_vectors[0])
+    index = faiss.IndexFlatIP(dim)
+    emb_array = np.array(stored_vectors, dtype=np.float32)
+    faiss.normalize_L2(emb_array)
+    index.add(emb_array)
+
+    query_vec = np.array([vector], dtype=np.float32)
+    faiss.normalize_L2(query_vec)
+    scores, indices = index.search(query_vec, min(limit * 2, len(chunks)))
+
+    results: list[dict[str, Any]] = []
+    seen: set[int] = set()
+    for idx_list, score_list in zip(indices, scores):
+        for idx, score in zip(idx_list, score_list):
+            if idx < 0 or idx >= len(chunks) or idx in seen:
+                continue
+            seen.add(idx)
+            chunk = chunks[idx]
+            results.append({
+                "id": chunk["id"],
+                "title": chunk["title"],
+                "content": chunk["content"],
+                "category": chunk.get("category", ""),
+                "score": round(float(score), 4),
+                "retrieval_mode": "faiss-semantic",
+            })
+    return results[:limit]
+
+
 async def vector_search(question: str, dataset_id: int | None, limit: int = 4) -> list[dict[str, Any]]:
     settings = get_settings()
     status = await sync_knowledge()
@@ -472,6 +542,10 @@ async def vector_search(question: str, dataset_id: int | None, limit: int = 4) -
     collection_name = str(status["collection"])
     if store == "qdrant":
         results = _search_qdrant(settings, question, vector, dataset_id, limit, collection_name)
+    elif store == "faiss":
+        results = _search_faiss(settings, question, vector, dataset_id, limit)
+    elif store == "milvus":
+        raise VectorStoreError("Milvus 适配器规划中，当前请使用 qdrant 或 faiss")
     elif store == "faiss":
         results = _search_faiss(settings, question, vector, dataset_id, limit, collection_name)
     elif store == "milvus":

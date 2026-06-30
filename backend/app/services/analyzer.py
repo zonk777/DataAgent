@@ -567,6 +567,110 @@ async def _answer_knowledge(
     return payload
 
 
+async def _anomaly_attribution_insights(
+    question: str,
+    dataset: dict,
+    query_plan: QueryPlan,
+    rows: list[dict[str, Any]],
+) -> list[str]:
+    """Multi-dimensional attribution: compare periods + drill down by region/product/channel/time."""
+
+    if not rows or not query_plan.time_description:
+        return _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
+
+    # 1. Build comparison query for previous period
+    prev_desc_map = {
+        "近": "上期", "最近": "上期", "本月": "上月", "今年": "去年", "本年": "去年",
+    }
+    prev_question = question
+    for curr, prev in prev_desc_map.items():
+        if curr in question:
+            prev_question = question.replace(curr, prev, 1)
+            break
+    if prev_question == question:
+        prev_question = f"上期 {question}"
+
+    prev_plan = _build_query(prev_question, dataset, max(len(rows) * 2, 100))
+    try:
+        with connect() as conn:
+            prev_result = conn.execute(prev_plan.sql, prev_plan.params).fetchall()
+            prev_rows = [dict(row) for row in prev_result]
+    except Exception:
+        return _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
+
+    if not prev_rows:
+        return _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
+
+    # 2. Calculate overall delta
+    y_field = query_plan.y_field
+    current_total = sum(float(row.get(y_field, 0) or 0) for row in rows)
+    prev_total = sum(float(row.get(y_field, 0) or 0) for row in prev_rows)
+    if prev_total == 0:
+        return _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
+
+    delta_pct = round((current_total - prev_total) / prev_total * 100, 1)
+
+    # 3. Drill down: region → product → channel → time (month/week)
+    profile = _column_profile(dataset["columns"])
+    dimensions: list[tuple[str, str]] = []
+    if profile.get("region") and any(row.get(profile["region"]) for row in rows if profile["region"]):
+        dimensions.append((profile["region"], "区域"))
+    if profile.get("product") and any(row.get(profile["product"]) for row in rows if profile["product"]):
+        dimensions.append((profile["product"], "产品类别"))
+    if profile.get("channel") and any(row.get(profile["channel"]) for row in rows if profile["channel"]):
+        dimensions.append((profile["channel"], "渠道"))
+    # 4th dimension: time-based segmentation
+    if profile.get("date") and query_plan.x_field not in ("区域", "产品类别", "渠道"):
+        dimensions.append((profile["date"], "时间"))
+
+    contributions: list[dict] = []
+    for dim_col, dim_label in dimensions:
+        current_by: dict[str, float] = defaultdict(float)
+        prev_by: dict[str, float] = defaultdict(float)
+        for row in rows:
+            dim_val = str(row.get(dim_col, "未知"))[:16]
+            current_by[dim_val] += float(row.get(y_field, 0) or 0)
+        for row in prev_rows:
+            dim_val = str(row.get(dim_col, "未知"))[:16]
+            prev_by[dim_val] += float(row.get(y_field, 0) or 0)
+
+        all_vals = set(current_by.keys()) | set(prev_by.keys())
+        for val in all_vals:
+            curr = current_by.get(val, 0)
+            prev = prev_by.get(val, 0)
+            if prev == 0:
+                continue
+            dim_delta = round((curr - prev) / prev * 100, 1)
+            contrib = round((curr - prev) / prev_total * 100, 1)
+            contributions.append({
+                "dimension": dim_label,
+                "value": val,
+                "current": round(curr, 2),
+                "previous": round(prev, 2),
+                "delta_pct": dim_delta,
+                "contribution_pct": contrib,
+            })
+
+    contributions.sort(key=lambda x: abs(x["contribution_pct"]), reverse=True)
+
+    # 4. Format insights
+    insights: list[str] = []
+    direction = "增长" if delta_pct > 0 else "下降"
+    insights.append(f"本期{y_field}较上期{direction}{abs(delta_pct)}%（{prev_total:,.2f}→{current_total:,.2f}）。")
+
+    if contributions:
+        for item in contributions[:4]:
+            dw = "增长" if item["delta_pct"] > 0 else "下降"
+            insights.append(
+                f"• {item['dimension']}「{item['value']}」{dw}{abs(item['delta_pct'])}%，"
+                f"贡献总变化的{abs(item['contribution_pct'])}%（{item['previous']:,.2f}→{item['current']:,.2f}）"
+            )
+        largest = contributions[0]
+        insights.append(f"→ 建议重点关注{largest['dimension']}「{largest['value']}」的异常变化，排查业务根因。")
+
+    return insights
+
+
 async def analyze(question: str, session_id: str | None, dataset_id: int | None) -> dict:
     settings = get_settings()
     session_id = session_id or uuid.uuid4().hex
@@ -594,7 +698,10 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
 
     knowledge = await search_knowledge(effective_question, dataset_id)
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
-    insights = await polish_insights(effective_question, rows, draft, knowledge)
+    if intent_result.label == "anomaly_attribution":
+        insights = await _anomaly_attribution_insights(effective_question, dataset, query_plan, rows)
+    else:
+        insights = await polish_insights(effective_question, rows, draft, knowledge)
     chart_recommendation = recommend_chart(
         effective_question,
         intent_result.label,

@@ -713,3 +713,34 @@ def dataset_quality(dataset_id: int) -> dict[str, Any]:
             f"疑似异常值 {outlier_count} 个，异常率 {outlier_rate * 100:.2f}%",
         ],
     }
+
+
+def save_column_lineage(dataset_id: int, columns_lineage: list[dict[str, Any]]) -> list[dict]:
+    """Upsert data lineage records for dataset columns."""
+    with connect() as conn:
+        for item in columns_lineage:
+            conn.execute(
+                """INSERT INTO data_lineage(dataset_id, column_name, source_table, source_column, transformation)
+                   VALUES (?, ?, ?, ?, ?)
+                   ON CONFLICT(dataset_id, column_name)
+                   DO UPDATE SET source_table=excluded.source_table, source_column=excluded.source_column,
+                                 transformation=excluded.transformation, updated_at=CURRENT_TIMESTAMP""",
+                (
+                    dataset_id,
+                    item["column_name"],
+                    item.get("source_table"),
+                    item.get("source_column"),
+                    item.get("transformation"),
+                ),
+            )
+    return get_column_lineage(dataset_id)
+
+
+def get_column_lineage(dataset_id: int) -> list[dict]:
+    """Get all lineage records for a dataset."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT * FROM data_lineage WHERE dataset_id = ? ORDER BY column_name",
+            (dataset_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]

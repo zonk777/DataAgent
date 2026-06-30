@@ -9,10 +9,12 @@ from ..services.datasets import (
     browse_mysql_schema,
     dataset_quality,
     delete_dataset,
+    get_column_lineage,
     get_dataset,
     import_dataset,
     import_mysql_dataset,
     list_datasets,
+    save_column_lineage,
     save_upload_chunk,
     test_mysql_connection,
     update_column_description,
@@ -200,6 +202,20 @@ def quality(dataset_id: int, request: Request) -> dict:
         return dataset_quality(dataset_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{dataset_id}/lineage")
+def lineage(dataset_id: int, request: Request) -> list[dict]:
+    current_admin(request)
+    ensure_dataset_access(current_admin(request), dataset_id)
+    return get_column_lineage(dataset_id)
+
+
+@router.put("/{dataset_id}/lineage", status_code=201)
+def save_lineage(dataset_id: int, payload: list[dict], request: Request) -> list[dict]:
+    actor = require_data_manager(request)
+    ensure_dataset_access(actor, dataset_id)
+    return save_column_lineage(dataset_id, payload)
 
 
 @router.delete("/{dataset_id}", status_code=204)

@@ -648,13 +648,6 @@ onMounted(bootstrap)
         <div class="settings-grid">
           <article class="panel setting-card"><div class="setting-head"><span class="metric-icon blue"><AppIcon name="spark" /></span><div><h3>大语言模型</h3><p>OpenAI 兼容接口</p></div><em :class="{ ready: config?.llm_configured }">{{ config?.llm_configured ? '已配置' : '待配置' }}</em></div><dl><div><dt>模型</dt><dd>{{ config?.llm_model || '未设置' }}</dd></div><div><dt>API Key</dt><dd>仅后端可见</dd></div></dl></article>
           <article class="panel setting-card"><div class="setting-head"><span class="metric-icon cyan"><AppIcon name="book" /></span><div><h3>Embedding / RAG</h3><p>语义向量检索</p></div><em :class="{ ready: config?.embedding_configured }">{{ config?.embedding_configured ? '已启用' : '关键词降级' }}</em></div><dl><div><dt>Embedding 模型</dt><dd>{{ config?.embedding_model || '未配置' }}</dd></div><div><dt>向量存储</dt><dd>{{ config?.vector_store }}</dd></div><div><dt>已索引知识</dt><dd>{{ config?.vector_indexed_count ?? 0 }} 条</dd></div></dl></article>
-          <article class="panel setup-card"><h3>API Key 配置位置</h3><p>这里是配置说明，不是当前真实密钥内容。复制 <code>backend/.env.example</code> 为 <code>backend/.env</code>，然后按你选择的平台填写，例如 DeepSeek：</p><pre>LLM_API_KEY=你的密钥
-LLM_BASE_URL=https://api.deepseek.com
-LLM_MODEL=你要使用的模型
-
-EMBEDDING_API_KEY=你的嵌入模型密钥
-EMBEDDING_BASE_URL=你的嵌入模型接口地址
-EMBEDDING_MODEL=你要使用的嵌入模型</pre><p class="security-note">真实 <code>.env</code> 只在后端读取，不会返回给浏览器；不要把 <code>.env</code> 提交到 Git。</p></article>
         </div>
       </section>
     </main>

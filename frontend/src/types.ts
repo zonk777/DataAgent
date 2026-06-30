@@ -36,9 +36,22 @@ export interface DatasetQuality {
   dataset_id: number
   row_count: number
   column_count: number
+  quality_score: number
+  quality_level: string
+  score_detail: {
+    completeness_score: number
+    uniqueness_score: number
+    validity_score: number
+    missing_rate: number
+    duplicate_rate: number
+    outlier_rate: number
+  }
   duplicate_rows: number
+  duplicate_rate: number
+  duplicate_samples: Record<string, unknown>[]
+  duplicate_values: Array<{ column: string; duplicate_value_count: number; duplicate_rate: number; top_values: Array<{ value: string; count: number }> }>
   missing: Array<{ column: string; missing_count: number; missing_rate: number }>
-  outliers: Array<{ column: string; outlier_count: number }>
+  outliers: Array<{ column: string; outlier_count: number; outlier_rate: number; lower_bound: number | null; upper_bound: number | null; sample_values: unknown[] }>
   summary: string[]
 }
 
@@ -57,7 +70,20 @@ export interface AnalysisResult {
   session_id: string
   message: string
   intent: string
+  intent_label?: 'data_query' | 'trend_analysis' | 'anomaly_attribution' | 'knowledge_qa' | 'report_generation'
+  intent_confidence?: number
+  intent_method?: string
+  intent_reason?: string
+  sql_source?: string
   plan: string[]
+  plan_steps?: Array<{
+    id: number
+    title: string
+    tool: string
+    depends_on: number[]
+    status: string
+    detail: string
+  }>
   sql: string
   columns: string[]
   rows: Record<string, string | number | null>[]

@@ -1,0 +1,50 @@
+{"question":"查询各地区销售额合计","label":"data_query"}
+{"question":"统计本月每个渠道的订单数","label":"data_query"}
+{"question":"计算华东地区销售额占比","label":"data_query"}
+{"question":"列出投诉率最高的产品类别","label":"data_query"}
+{"question":"查询各产品毛利润排名","label":"data_query"}
+{"question":"统计不同渠道的转化率","label":"data_query"}
+{"question":"分析各区域销售额分布","label":"data_query"}
+{"question":"看看本季度订单总数是多少","label":"data_query"}
+{"question":"查询西南地区各产品销售额","label":"data_query"}
+{"question":"对比线上和线下渠道销售额","label":"data_query"}
+{"question":"分析近30天销售额趋势","label":"trend_analysis"}
+{"question":"按月份展示利润走势","label":"trend_analysis"}
+{"question":"最近10天各地区订单变化","label":"trend_analysis"}
+{"question":"查看本月每日销售额走势","label":"trend_analysis"}
+{"question":"按周分析投诉率趋势","label":"trend_analysis"}
+{"question":"今年每个月转化率变化","label":"trend_analysis"}
+{"question":"展示近7日访问量趋势图","label":"trend_analysis"}
+{"question":"分析华南地区销售额环比变化","label":"trend_analysis"}
+{"question":"近三个月订单数走势如何","label":"trend_analysis"}
+{"question":"按天看各渠道销售额变化","label":"trend_analysis"}
+{"question":"为什么华东销售额突然下降","label":"anomaly_attribution"}
+{"question":"分析投诉率异常升高的原因","label":"anomaly_attribution"}
+{"question":"西南地区订单数下滑是什么原因","label":"anomaly_attribution"}
+{"question":"找出利润波动异常并解释原因","label":"anomaly_attribution"}
+{"question":"转化率偏低的归因分析","label":"anomaly_attribution"}
+{"question":"为什么线上渠道访问量突增","label":"anomaly_attribution"}
+{"question":"分析最近销售额暴增的原因","label":"anomaly_attribution"}
+{"question":"解释产品类别投诉异常的可能原因","label":"anomaly_attribution"}
+{"question":"华北毛利润骤降是哪里出了问题","label":"anomaly_attribution"}
+{"question":"订单量异常波动请做归因","label":"anomaly_attribution"}
+{"question":"销售额的计算口径是什么","label":"knowledge_qa"}
+{"question":"转化率怎么计算","label":"knowledge_qa"}
+{"question":"什么是有效订单","label":"knowledge_qa"}
+{"question":"投诉率字段含义是什么","label":"knowledge_qa"}
+{"question":"请解释毛利润的业务定义","label":"knowledge_qa"}
+{"question":"知识库里渠道字段怎么说明","label":"knowledge_qa"}
+{"question":"订单数指标口径是什么","label":"knowledge_qa"}
+{"question":"退货金额是否计入销售额","label":"knowledge_qa"}
+{"question":"业务规则里如何定义高价值客户","label":"knowledge_qa"}
+{"question":"访问量和转化数的关系是什么","label":"knowledge_qa"}
+{"question":"生成本次分析报告","label":"report_generation"}
+{"question":"导出 PDF 分析报告","label":"report_generation"}
+{"question":"把结果生成 Word 文档","label":"report_generation"}
+{"question":"下载本轮对话的 Markdown 报告","label":"report_generation"}
+{"question":"请生成经营分析报告","label":"report_generation"}
+{"question":"导出当前图表和结论","label":"report_generation"}
+{"question":"生成 docx 报告给领导看","label":"report_generation"}
+{"question":"把近30天销售趋势生成报告","label":"report_generation"}
+{"question":"下载销售额分析 PDF","label":"report_generation"}
+{"question":"生成包含 SQL 和图表的报告","label":"report_generation"}

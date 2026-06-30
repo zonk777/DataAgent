@@ -49,6 +49,29 @@ class MySQLImportRequest(BaseModel):
     name: str | None = Field(default=None, max_length=120)
     description: str = Field(default="", max_length=1000)
     limit: int = Field(default=100000, ge=1, le=1000000)
+    connect_timeout: int = Field(default=5, ge=1, le=60)
+    read_timeout: int = Field(default=20, ge=1, le=300)
+    ssl_enabled: bool = False
+    ssl_ca: str | None = Field(default=None, max_length=500)
+    ssl_cert: str | None = Field(default=None, max_length=500)
+    ssl_key: str | None = Field(default=None, max_length=500)
+    ssh_enabled: bool = False
+
+
+class MySQLSchemaRequest(BaseModel):
+    host: str = Field(min_length=1, max_length=255)
+    port: int = Field(default=3306, ge=1, le=65535)
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(default="", max_length=256)
+    database: str | None = Field(default=None, max_length=128)
+    table: str | None = Field(default=None, max_length=128)
+    connect_timeout: int = Field(default=5, ge=1, le=60)
+    read_timeout: int = Field(default=20, ge=1, le=300)
+    ssl_enabled: bool = False
+    ssl_ca: str | None = Field(default=None, max_length=500)
+    ssl_cert: str | None = Field(default=None, max_length=500)
+    ssl_key: str | None = Field(default=None, max_length=500)
+    ssh_enabled: bool = False
 
 
 class LoginRequest(BaseModel):
@@ -78,11 +101,26 @@ class ChartSpec(BaseModel):
     series_fields: list[str] = Field(default_factory=list)
 
 
+class PlanStepSpec(BaseModel):
+    id: int
+    title: str
+    tool: str
+    depends_on: list[int] = Field(default_factory=list)
+    status: str = "completed"
+    detail: str = ""
+
+
 class AnalysisResponse(BaseModel):
     session_id: str
     message: str
     intent: str
+    intent_label: Literal["data_query", "trend_analysis", "anomaly_attribution", "knowledge_qa", "report_generation"] | None = None
+    intent_confidence: float | None = None
+    intent_method: str | None = None
+    intent_reason: str | None = None
+    sql_source: str | None = None
     plan: list[str]
+    plan_steps: list[PlanStepSpec] = Field(default_factory=list)
     sql: str
     columns: list[str]
     rows: list[dict[str, Any]]

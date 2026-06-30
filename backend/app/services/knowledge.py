@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import Counter
 
@@ -40,12 +41,14 @@ def keyword_search(question: str, dataset_id: int | None, limit: int = 4) -> lis
 
 async def search_knowledge(question: str, dataset_id: int | None, limit: int = 4) -> list[dict]:
     settings = get_settings()
-    if settings.vector_store.lower() == "qdrant" and settings.embedding_configured:
+    if settings.vector_store.lower() in {"qdrant", "faiss", "milvus"} and settings.embedding_configured:
         try:
-            results = await vector_search(question, dataset_id, limit)
+            results = await asyncio.wait_for(
+                vector_search(question, dataset_id, limit),
+                timeout=settings.semantic_search_timeout_seconds,
+            )
             if results:
                 return results
-        except VectorStoreError:
+        except (VectorStoreError, TimeoutError):
             pass
     return keyword_search(question, dataset_id, limit)
-

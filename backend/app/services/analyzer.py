@@ -10,9 +10,12 @@ from typing import Any
 
 from ..config import get_settings
 from ..db import connect, using_mysql
+from .intent_classifier import IntentResult, classify_intent
 from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, polish_insights
+from .planner import build_plan_steps, plan_titles
 from .security import validate_readonly_sql
+from .sql_generator import generate_llm_sql, query_plan_source
 
 
 REGIONS = ["华东", "华南", "华北", "西南"]
@@ -372,15 +375,27 @@ async def _answer_knowledge(
     dataset_id: int | None,
     history: list[dict[str, Any]],
     context_applied: bool,
+    intent_result: IntentResult,
 ) -> dict:
     settings = get_settings()
     knowledge = await search_knowledge(effective_question, dataset_id, limit=5)
     answer = await answer_from_knowledge(question, knowledge, history)
+    execution_mode = "llm-assisted" if settings.llm_configured else "knowledge-extract"
+    plan_steps = build_plan_steps(
+        intent=intent_result,
+        answer_type="knowledge_qa",
+        execution_mode=execution_mode,
+    )
     payload = {
         "session_id": session_id,
         "message": "已根据企业知识库回答。",
-        "intent": "知识库问答",
-        "plan": ["识别知识问答意图", "从 Qdrant 检索相关知识", "按数据集权限过滤", "基于知识片段生成回答"],
+        "intent": intent_result.display_name,
+        "intent_label": intent_result.label,
+        "intent_confidence": intent_result.confidence,
+        "intent_method": intent_result.method,
+        "intent_reason": intent_result.reason,
+        "plan": plan_titles(plan_steps),
+        "plan_steps": plan_steps,
         "sql": "",
         "columns": [],
         "rows": [],
@@ -395,7 +410,7 @@ async def _answer_knowledge(
         },
         "insights": [answer],
         "knowledge_refs": knowledge,
-        "execution_mode": "llm-assisted" if settings.llm_configured else "knowledge-extract",
+        "execution_mode": execution_mode,
         "answer_type": "knowledge_qa",
         "context_applied": context_applied,
         "effective_question": effective_question,
@@ -409,17 +424,22 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
     session_id = session_id or uuid.uuid4().hex
     history = _load_history(session_id)
     effective_question, context_applied = _merge_followup(question, history)
+    intent_result = await classify_intent(effective_question, history)
+    if _is_knowledge_question(question, history) and intent_result.label == "data_query":
+        intent_result = IntentResult("knowledge_qa", 0.86, "rules", "知识问答追问兜底")
     _store_user(session_id, question, dataset_id)
 
-    if _is_knowledge_question(question, history):
+    if intent_result.label == "knowledge_qa":
         return await _answer_knowledge(
-            question, effective_question, session_id, dataset_id, history, context_applied
+            question, effective_question, session_id, dataset_id, history, context_applied, intent_result
         )
 
     dataset = _dataset(dataset_id)
     dataset_id = dataset["id"]
     query_plan = _build_query(effective_question, dataset, settings.query_row_limit)
-    safe_sql = validate_readonly_sql(query_plan.sql, dataset["table_name"])
+    llm_sql = await generate_llm_sql(effective_question, dataset, settings.query_row_limit)
+    plan_source = query_plan_source(effective_question, llm_sql)
+    safe_sql = validate_readonly_sql(llm_sql or query_plan.sql, dataset["table_name"])
     with connect() as conn:
         result = conn.execute(safe_sql, query_plan.params).fetchall()
         rows = [_jsonable_row(dict(row)) for row in result]
@@ -436,22 +456,29 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
         chart_type = "pie"
     else:
         chart_type = "line" if is_time else ("pie" if "占比" in effective_question and len(rows) <= 8 else "bar")
-    intent = "趋势分析" if is_time else (
-        "异常归因" if "原因" in effective_question or "异常" in effective_question else "指标查询"
-    )
+    intent = intent_result.display_name
     scope_parts = [item for item in (query_plan.time_description, *query_plan.series_fields) if item]
     scope = "、".join(scope_parts) or query_plan.x_field
+    execution_mode = "llm-assisted" if settings.llm_configured else "local-demo"
+    plan_steps = build_plan_steps(
+        intent=intent_result,
+        answer_type="data_analysis",
+        execution_mode=execution_mode,
+        scope=scope,
+        dataset_name=dataset["name"],
+        chart_type=chart_type,
+    )
     payload = {
         "session_id": session_id,
         "message": "分析完成。" + (" 已继承上轮对话条件。" if context_applied else ""),
         "intent": intent,
-        "plan": [
-            f"识别分析意图：{intent}",
-            f"确定查询范围与分组：{scope}",
-            f"检索数据集与指标口径：{dataset['name']}",
-            "生成并校验只读 SQL",
-            f"执行查询并生成{chart_type}图与业务结论",
-        ],
+        "intent_label": intent_result.label,
+        "intent_confidence": intent_result.confidence,
+        "intent_method": intent_result.method,
+        "intent_reason": intent_result.reason,
+        "sql_source": plan_source,
+        "plan": plan_titles(plan_steps),
+        "plan_steps": plan_steps,
         "sql": safe_sql,
         "columns": list(rows[0].keys()) if rows else [query_plan.x_field, query_plan.y_field],
         "rows": rows,
@@ -466,7 +493,7 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
         },
         "insights": insights,
         "knowledge_refs": knowledge,
-        "execution_mode": "llm-assisted" if settings.llm_configured else "local-demo",
+        "execution_mode": execution_mode,
         "answer_type": "data_analysis",
         "context_applied": context_applied,
         "effective_question": effective_question,

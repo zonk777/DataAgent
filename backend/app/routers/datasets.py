@@ -1,15 +1,20 @@
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 
-from ..models import DatasetColumnUpdate, DatasetUpdate, MySQLImportRequest
+from ..models import DatasetColumnUpdate, DatasetUpdate, MySQLImportRequest, MySQLSchemaRequest
 from ..services.audit import log_action
 from ..services.auth import current_admin
 from ..services.datasets import (
+    chunk_upload_status,
+    complete_chunk_upload,
+    browse_mysql_schema,
     dataset_quality,
     delete_dataset,
     get_dataset,
     import_dataset,
     import_mysql_dataset,
     list_datasets,
+    save_upload_chunk,
+    test_mysql_connection,
     update_column_description,
     update_dataset,
 )
@@ -50,6 +55,71 @@ async def upload_dataset(
     return result
 
 
+@router.get("/upload/chunks/{upload_id}")
+def upload_chunks(upload_id: str, request: Request) -> dict:
+    require_data_manager(request)
+    try:
+        return chunk_upload_status(upload_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/upload/chunk")
+async def upload_dataset_chunk(
+    request: Request,
+    file: UploadFile = File(...),
+    upload_id: str = Form(...),
+    chunk_index: int = Form(...),
+    total_chunks: int = Form(...),
+    total_size: int = Form(...),
+    filename: str = Form(...),
+) -> dict:
+    actor = require_data_manager(request)
+    try:
+        content = await file.read()
+        result = save_upload_chunk(
+            upload_id=upload_id,
+            chunk_index=chunk_index,
+            total_chunks=total_chunks,
+            total_size=total_size,
+            filename=filename,
+            content=content,
+        )
+    except ValueError as exc:
+        log_action("upload_dataset_chunk", "dataset", None, str(exc), status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result
+
+
+@router.post("/upload/complete", status_code=201)
+def complete_dataset_upload(
+    request: Request,
+    upload_id: str = Form(...),
+    filename: str = Form(...),
+    total_chunks: int = Form(...),
+    total_size: int = Form(...),
+    name: str | None = Form(default=None),
+    description: str = Form(default=""),
+) -> dict:
+    actor = require_data_manager(request)
+    try:
+        result = complete_chunk_upload(
+            upload_id=upload_id,
+            filename=filename,
+            total_chunks=total_chunks,
+            total_size=total_size,
+            name=name,
+            description=description,
+        )
+    except ValueError as exc:
+        log_action("complete_dataset_upload", "dataset", None, str(exc), status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if accessible_dataset_ids(actor) is not None:
+        set_dataset_permissions(actor["id"], [*get_dataset_permissions(actor["id"]), result["id"]])
+    log_action("upload_dataset", "dataset", result["id"], filename or result["name"], actor=actor)
+    return result
+
+
 @router.post("/mysql/import", status_code=201)
 def mysql_import(payload: MySQLImportRequest, request: Request) -> dict:
     actor = require_data_manager(request)
@@ -61,6 +131,30 @@ def mysql_import(payload: MySQLImportRequest, request: Request) -> dict:
     if accessible_dataset_ids(actor) is not None:
         set_dataset_permissions(actor["id"], [*get_dataset_permissions(actor["id"]), result["id"]])
     log_action("import_mysql", "dataset", result["id"], f"{payload.database}.{payload.table}", actor=actor)
+    return result
+
+
+@router.post("/mysql/test")
+def mysql_test(payload: MySQLSchemaRequest, request: Request) -> dict:
+    actor = require_data_manager(request)
+    try:
+        result = test_mysql_connection(payload)
+    except ValueError as exc:
+        log_action("test_mysql", "dataset", payload.host, str(exc), status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_action("test_mysql", "dataset", payload.host, "MySQL 连接测试成功", actor=actor)
+    return result
+
+
+@router.post("/mysql/schema")
+def mysql_schema(payload: MySQLSchemaRequest, request: Request) -> dict:
+    actor = require_data_manager(request)
+    try:
+        result = browse_mysql_schema(payload)
+    except ValueError as exc:
+        log_action("browse_mysql_schema", "dataset", payload.host, str(exc), status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    log_action("browse_mysql_schema", "dataset", payload.host, payload.database or "databases", actor=actor)
     return result
 
 

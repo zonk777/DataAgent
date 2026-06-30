@@ -2,7 +2,7 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import AppIcon from './components/AppIcon.vue'
 import ResultChart from './components/ResultChart.vue'
-import { api } from './api'
+import { api, type MySQLSchema, type UploadProgress } from './api'
 import type { AdminUser, AnalysisResult, AuditLog, ChatMessage, ConfigStatus, DashboardData, Dataset, DatasetQuality, KnowledgeItem, SessionSummary, ViewName } from './types'
 
 const activeView = ref<ViewName>('overview')
@@ -25,10 +25,17 @@ const uploadFile = ref<File | null>(null)
 const uploadName = ref('')
 const uploadDescription = ref('')
 const uploading = ref(false)
+const uploadProgress = ref(0)
+const uploadStatus = ref('')
 const datasetEdit = ref({ name: '', description: '' })
 const columnDrafts = ref<Record<string, string>>({})
-const mysqlForm = ref({ host: '127.0.0.1', port: 3306, username: 'root', password: '', database: '', table: '', name: '', description: '', limit: 100000 })
+const mysqlDefaults = { host: '127.0.0.1', port: 3306, username: 'root', password: '', database: '', table: '', name: '', description: '', limit: 100000, connect_timeout: 5, read_timeout: 20, ssl_enabled: false, ssl_ca: '', ssl_cert: '', ssl_key: '', ssh_enabled: false }
+const mysqlForm = ref({ ...mysqlDefaults })
 const importingMysql = ref(false)
+const testingMysql = ref(false)
+const loadingMysqlSchema = ref(false)
+const mysqlStatus = ref('')
+const mysqlSchema = ref<MySQLSchema>({ databases: [], tables: [], columns: [] })
 const knowledgeForm = ref({ title: '', content: '', category: 'business_rule' })
 const editingKnowledgeId = ref<number | null>(null)
 const knowledgeFile = ref<File | null>(null)
@@ -225,14 +232,23 @@ async function inspectDataset(id: number) {
 function chooseFile(event: Event) {
   uploadFile.value = (event.target as HTMLInputElement).files?.[0] || null
   if (uploadFile.value && !uploadName.value) uploadName.value = uploadFile.value.name.replace(/\.[^.]+$/, '')
+  uploadProgress.value = 0
+  uploadStatus.value = ''
+}
+
+function onUploadProgress(progress: UploadProgress) {
+  uploadProgress.value = progress.percent
+  uploadStatus.value = progress.status
 }
 
 async function upload() {
   if (!uploadFile.value) return
   uploading.value = true
   error.value = ''
+  uploadProgress.value = 0
+  uploadStatus.value = '准备上传文件'
   try {
-    const created = await api.upload(uploadFile.value, uploadName.value, uploadDescription.value)
+    const created = await api.upload(uploadFile.value, uploadName.value, uploadDescription.value, onUploadProgress)
     datasets.value = await api.datasets()
     selectedDatasetId.value = created.id
     selectedDataset.value = created
@@ -242,6 +258,7 @@ async function upload() {
     uploadFile.value = null
     uploadName.value = ''
     uploadDescription.value = ''
+    uploadStatus.value = '导入完成'
     dashboard.value = await api.dashboard()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '上传失败'
@@ -272,6 +289,64 @@ async function deleteSelectedDataset() {
   dashboard.value = await api.dashboard()
 }
 
+function mysqlPayload() {
+  return {
+    ...mysqlForm.value,
+    database: mysqlForm.value.database || undefined,
+    table: mysqlForm.value.table || undefined,
+    ssl_ca: mysqlForm.value.ssl_ca || undefined,
+    ssl_cert: mysqlForm.value.ssl_cert || undefined,
+    ssl_key: mysqlForm.value.ssl_key || undefined,
+  }
+}
+
+async function testMysql() {
+  if (!mysqlForm.value.host || !mysqlForm.value.username) return
+  testingMysql.value = true
+  mysqlStatus.value = ''
+  error.value = ''
+  try {
+    const result = await api.testMysql(mysqlPayload())
+    mysqlStatus.value = `连接成功：${result.version || 'MySQL'}，连接池大小 ${result.pool_size || 5}`
+    await loadMysqlSchema()
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'MySQL 连接失败'
+  } finally {
+    testingMysql.value = false
+  }
+}
+
+async function loadMysqlSchema() {
+  if (!mysqlForm.value.host || !mysqlForm.value.username) return
+  loadingMysqlSchema.value = true
+  error.value = ''
+  try {
+    mysqlSchema.value = await api.mysqlSchema(mysqlPayload())
+    if (!mysqlForm.value.database && mysqlSchema.value.databases.length) {
+      mysqlForm.value.database = mysqlSchema.value.databases[0]
+      await loadMysqlSchema()
+      return
+    }
+    if (mysqlForm.value.table && !mysqlSchema.value.tables.some((table) => table.name === mysqlForm.value.table)) {
+      mysqlForm.value.table = ''
+    }
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : '读取 MySQL schema 失败'
+  } finally {
+    loadingMysqlSchema.value = false
+  }
+}
+
+async function chooseMysqlDatabase() {
+  mysqlForm.value.table = ''
+  mysqlSchema.value.columns = []
+  await loadMysqlSchema()
+}
+
+async function chooseMysqlTable() {
+  await loadMysqlSchema()
+}
+
 async function importMysql() {
   if (!mysqlForm.value.host || !mysqlForm.value.database || !mysqlForm.value.table || !mysqlForm.value.username) return
   importingMysql.value = true
@@ -281,7 +356,9 @@ async function importMysql() {
     datasets.value = await api.datasets()
     selectedDatasetId.value = created.id
     await inspectDataset(created.id)
-    mysqlForm.value = { host: '127.0.0.1', port: 3306, username: 'root', password: '', database: '', table: '', name: '', description: '', limit: 100000 }
+    mysqlForm.value = { ...mysqlDefaults }
+    mysqlStatus.value = ''
+    mysqlSchema.value = { databases: [], tables: [], columns: [] }
     dashboard.value = await api.dashboard()
   } catch (err) {
     error.value = err instanceof Error ? err.message : 'MySQL 导入失败'
@@ -530,7 +607,15 @@ onMounted(bootstrap)
                   <a :href="api.reportUrl(result.session_id, 'md')" download><AppIcon name="file" :size="17" />Markdown</a>
                 </div>
               </div>
-              <div class="result-meta"><span>{{ result.intent }}</span><span>{{ result.execution_mode }}</span><span>{{ result.answer_type === 'knowledge_qa' ? `${result.knowledge_refs.length} 条知识依据` : `${result.rows.length} 条结果` }}</span><span v-if="result.context_applied">已使用对话上下文</span></div>
+              <div class="result-meta"><span>{{ result.intent }}</span><span v-if="result.intent_confidence">置信度 {{ (result.intent_confidence * 100).toFixed(0) }}%</span><span v-if="result.sql_source">SQL：{{ result.sql_source }}</span><span>{{ result.execution_mode }}</span><span>{{ result.answer_type === 'knowledge_qa' ? `${result.knowledge_refs.length} 条知识依据` : `${result.rows.length} 条结果` }}</span><span v-if="result.context_applied">已使用对话上下文</span></div>
+              <div v-if="result.plan_steps?.length" class="plan-card result-plan-card">
+                <div class="plan-head"><AppIcon name="check" :size="16"/><strong>任务执行计划</strong><em>{{ result.plan_steps.length }} 步</em></div>
+                <div v-for="step in result.plan_steps" :key="step.id" class="plan-step">
+                  <span>{{ step.id }}</span>
+                  <p>{{ step.title }}<small>工具：{{ step.tool }}<template v-if="step.depends_on.length"> · 依赖：{{ step.depends_on.join(', ') }}</template></small></p>
+                  <AppIcon name="check" :size="15"/>
+                </div>
+              </div>
               <div v-if="result.chart.type !== 'none'" class="chart-card"><ResultChart :result="result" /></div>
               <div class="insight-card"><h3><AppIcon name="spark" :size="19" />{{ result.answer_type === 'knowledge_qa' ? '知识库回答' : '关键发现' }}</h3><div v-for="(insight, index) in result.insights" :key="insight"><span>{{ index + 1 }}</span><p class="answer-text">{{ insight }}</p></div></div>
               <div v-if="result.knowledge_refs.length" class="knowledge-sources"><h3><AppIcon name="book" :size="18"/>知识依据</h3><article v-for="item in result.knowledge_refs" :key="item.id"><div><strong>{{ item.title }}</strong><em>{{ item.retrieval_mode || item.category }}<template v-if="item.score"> · {{ item.score.toFixed(3) }}</template></em></div><p>{{ item.content }}</p></article></div>
@@ -551,6 +636,10 @@ onMounted(bootstrap)
             <label class="drop-zone"><input type="file" accept=".csv,.xls,.xlsx" @change="chooseFile"/><AppIcon name="upload" :size="32"/><strong>{{ uploadFile?.name || '选择 CSV / Excel 文件' }}</strong><small>单文件最大 100MB</small></label>
             <input v-model="uploadName" placeholder="数据集名称（可选）"/>
             <textarea v-model="uploadDescription" placeholder="数据集用途与说明" rows="3"/>
+            <div v-if="uploading || uploadProgress > 0" class="upload-progress">
+              <div><span>{{ uploadStatus || '等待上传' }}</span><b>{{ uploadProgress }}%</b></div>
+              <i><span :style="{ width: `${uploadProgress}%` }"/></i>
+            </div>
             <button class="primary-btn" :disabled="!uploadFile || uploading || !canManageData()" @click="upload">{{ uploading ? '正在导入...' : '开始导入' }}</button>
           </article>
           <article class="panel upload-panel">
@@ -559,10 +648,38 @@ onMounted(bootstrap)
             <input v-model.number="mysqlForm.port" type="number" placeholder="端口"/>
             <input v-model="mysqlForm.username" placeholder="用户名"/>
             <input v-model="mysqlForm.password" type="password" placeholder="密码"/>
-            <input v-model="mysqlForm.database" placeholder="数据库名"/>
-            <input v-model="mysqlForm.table" placeholder="表名"/>
+            <div class="mysql-options">
+              <label><input v-model="mysqlForm.ssl_enabled" type="checkbox"/> SSL</label>
+              <label><input v-model="mysqlForm.ssh_enabled" type="checkbox"/> SSH 隧道</label>
+            </div>
+            <template v-if="mysqlForm.ssl_enabled">
+              <input v-model="mysqlForm.ssl_ca" placeholder="SSL CA 证书路径（可选）"/>
+              <input v-model="mysqlForm.ssl_cert" placeholder="SSL 客户端证书路径（可选）"/>
+              <input v-model="mysqlForm.ssl_key" placeholder="SSL 客户端私钥路径（可选）"/>
+            </template>
+            <div class="mysql-action-row">
+              <button @click="testMysql">{{ testingMysql ? '测试中...' : '测试连接/读取库表' }}</button>
+              <button @click="loadMysqlSchema">{{ loadingMysqlSchema ? '读取中...' : '刷新 Schema' }}</button>
+            </div>
+            <div v-if="mysqlStatus" class="mysql-status">{{ mysqlStatus }}</div>
+            <select v-if="mysqlSchema.databases.length" v-model="mysqlForm.database" @change="chooseMysqlDatabase">
+              <option value="">选择数据库</option>
+              <option v-for="database in mysqlSchema.databases" :key="database" :value="database">{{ database }}</option>
+            </select>
+            <input v-else v-model="mysqlForm.database" placeholder="数据库名"/>
+            <select v-if="mysqlSchema.tables.length" v-model="mysqlForm.table" @change="chooseMysqlTable">
+              <option value="">选择数据表</option>
+              <option v-for="table in mysqlSchema.tables" :key="table.name" :value="table.name">{{ table.name }} · 约 {{ table.rows }} 行</option>
+            </select>
+            <input v-else v-model="mysqlForm.table" placeholder="表名"/>
+            <div v-if="mysqlSchema.columns.length" class="mysql-column-list">
+              <small>字段预览</small>
+              <span v-for="column in mysqlSchema.columns.slice(0, 12)" :key="column.name">{{ column.name }} / {{ column.column_type }}</span>
+            </div>
+            <input v-model.number="mysqlForm.limit" type="number" placeholder="最大导入行数，默认 100000"/>
             <input v-model="mysqlForm.name" placeholder="导入后的数据集名称（可选）"/>
             <button class="primary-btn" :disabled="importingMysql || !canManageData()" @click="importMysql">{{ importingMysql ? '正在导入...' : '连接并导入' }}</button>
+            <small class="field-help">SSH 隧道暂不内置，建议先用 Tailscale/ZeroTier 或本机隧道映射后再连接。</small>
           </article>
           <article class="panel"><div class="panel-title"><div><small>CONNECTED</small><h3>已接入数据集</h3></div></div><div class="dataset-cards"><button v-for="dataset in datasets" :key="dataset.id" :class="{ selected: selectedDatasetId === dataset.id }" @click="inspectDataset(dataset.id)"><span><AppIcon name="database" /></span><div><strong>{{ dataset.name }}</strong><small>{{ dataset.description || '暂无描述' }}</small><em>{{ dataset.row_count.toLocaleString() }} 行 · {{ dataset.column_count }} 字段</em></div><i>{{ dataset.source_type }}</i></button></div></article>
         </div>
@@ -578,6 +695,40 @@ onMounted(bootstrap)
           </div>
           <div v-if="selectedDatasetQuality" class="quality-grid">
             <div v-for="item in selectedDatasetQuality.summary" :key="item">{{ item }}</div>
+          </div>
+          <div v-if="selectedDatasetQuality" class="quality-detail-grid">
+            <article>
+              <strong>完整性</strong>
+              <em>{{ selectedDatasetQuality.score_detail.completeness_score }}</em>
+              <span>缺失率 {{ (selectedDatasetQuality.score_detail.missing_rate * 100).toFixed(2) }}%</span>
+            </article>
+            <article>
+              <strong>唯一性</strong>
+              <em>{{ selectedDatasetQuality.score_detail.uniqueness_score }}</em>
+              <span>重复率 {{ (selectedDatasetQuality.duplicate_rate * 100).toFixed(2) }}%</span>
+            </article>
+            <article>
+              <strong>有效性</strong>
+              <em>{{ selectedDatasetQuality.score_detail.validity_score }}</em>
+              <span>异常率 {{ (selectedDatasetQuality.score_detail.outlier_rate * 100).toFixed(2) }}%</span>
+            </article>
+          </div>
+          <div v-if="selectedDatasetQuality" class="quality-issue-grid">
+            <article>
+              <h4>缺失值 Top 字段</h4>
+              <p v-if="!selectedDatasetQuality.missing.some((item) => item.missing_count)">暂无缺失值</p>
+              <p v-for="item in selectedDatasetQuality.missing.filter((entry) => entry.missing_count).slice(0, 5)" :key="item.column">{{ item.column }}：{{ item.missing_count }} 个（{{ (item.missing_rate * 100).toFixed(2) }}%）</p>
+            </article>
+            <article>
+              <h4>重复值/重复行</h4>
+              <p>重复行：{{ selectedDatasetQuality.duplicate_rows }} 行</p>
+              <p v-for="item in selectedDatasetQuality.duplicate_values.slice(0, 5)" :key="item.column">{{ item.column }}：{{ item.duplicate_value_count }} 个重复值</p>
+            </article>
+            <article>
+              <h4>异常值字段</h4>
+              <p v-if="!selectedDatasetQuality.outliers.some((item) => item.outlier_count)">暂无疑似异常值</p>
+              <p v-for="item in selectedDatasetQuality.outliers.filter((entry) => entry.outlier_count).slice(0, 5)" :key="item.column">{{ item.column }}：{{ item.outlier_count }} 个，范围 {{ item.lower_bound ?? '-' }} ~ {{ item.upper_bound ?? '-' }}</p>
+            </article>
           </div>
           <div class="table-scroll"><table><thead><tr><th>字段</th><th>类型</th><th>业务说明</th><th>样例值</th><th>缺失率</th><th>操作</th></tr></thead><tbody><tr v-for="column in selectedDataset.columns" :key="column.name"><td><code>{{ column.name }}</code></td><td>{{ column.data_type }}</td><td><input v-model="columnDrafts[column.name]" class="inline-input"/></td><td>{{ column.sample_value }}</td><td>{{ (column.null_rate * 100).toFixed(1) }}%</td><td><button @click="saveColumnDescription(column.name)">保存</button></td></tr></tbody></table></div>
           <div v-if="selectedDataset.preview?.length" class="preview-block"><h3>前 100 行样例数据</h3><div class="table-scroll"><table><thead><tr><th v-for="column in selectedDataset.columns" :key="column.name">{{ column.name }}</th></tr></thead><tbody><tr v-for="(row, index) in selectedDataset.preview.slice(0, 100)" :key="index"><td v-for="column in selectedDataset.columns" :key="column.name">{{ row[column.name] }}</td></tr></tbody></table></div></div>

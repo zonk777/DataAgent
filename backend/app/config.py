@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     vector_store: str = "qdrant"
     qdrant_path: str = "storage/qdrant"
+    faiss_path: str = "storage/faiss"
+    milvus_uri: str = ""
+    milvus_token: str = ""
+    milvus_database: str = ""
+    semantic_search_timeout_seconds: float = Field(default=1.0, ge=0.1, le=30.0)
 
     max_upload_mb: int = Field(default=100, ge=1, le=200)
     query_row_limit: int = Field(default=500, ge=10, le=5000)
@@ -56,6 +61,11 @@ class Settings(BaseSettings):
     @property
     def qdrant_directory(self) -> Path:
         path = Path(self.qdrant_path)
+        return path if path.is_absolute() else BACKEND_DIR / path
+
+    @property
+    def faiss_directory(self) -> Path:
+        path = Path(self.faiss_path)
         return path if path.is_absolute() else BACKEND_DIR / path
 
 

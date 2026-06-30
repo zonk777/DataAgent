@@ -1,0 +1,20 @@
+{"question":"查询各地区销售额合计","must_contain":["GROUP BY","销售额"],"min_rows":4}
+{"question":"分析近10天各地区销售额趋势","must_contain":["date","GROUP BY"],"min_rows":10}
+{"question":"查询投诉率最高的产品类别","must_contain":["投诉率","GROUP BY"],"min_rows":4}
+{"question":"按月份展示销售额趋势","must_contain":["GROUP BY"],"min_rows":1}
+{"question":"统计不同渠道订单数","must_contain":["订单数","GROUP BY"],"min_rows":3}
+{"question":"查询各产品毛利润排名","must_contain":["毛利润","GROUP BY"],"min_rows":4}
+{"question":"查看本月每日转化率走势","must_contain":["转化率","GROUP BY"],"min_rows":1}
+{"question":"统计华东地区各产品销售额","must_contain":["华东","GROUP BY"],"min_rows":1}
+{"question":"分析近7天各渠道订单数趋势","must_contain":["date","订单数"],"min_rows":7}
+{"question":"查询各区域投诉率","must_contain":["投诉率","GROUP BY"],"min_rows":4}
+{"question":"按产品类别拆分近10天销售额趋势","must_contain":["产品类别","GROUP BY"],"min_rows":10}
+{"question":"查询各地区转化率最高的是谁","must_contain":["转化率","GROUP BY"],"min_rows":4}
+{"question":"统计华南地区订单数","must_contain":["华南"],"min_rows":1}
+{"question":"分析今年每月毛利润趋势","must_contain":["毛利润","GROUP BY"],"min_rows":1}
+{"question":"查看各渠道访问量分布","must_contain":["GROUP BY"],"min_rows":3}
+{"question":"查询各地区销售额占比","must_contain":["销售额","GROUP BY"],"min_rows":4}
+{"question":"近30天各产品投诉率趋势","must_contain":["投诉率","GROUP BY"],"min_rows":4}
+{"question":"按渠道对比销售额","must_contain":["渠道","销售额"],"min_rows":3}
+{"question":"统计西南地区各渠道销售额","must_contain":["西南","GROUP BY"],"min_rows":1}
+{"question":"查询订单数最高的区域","must_contain":["订单数","GROUP BY"],"min_rows":4}

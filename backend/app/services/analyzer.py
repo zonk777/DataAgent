@@ -1,17 +1,23 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date, timedelta
 from typing import Any
+
+import httpx
 
 from ..config import get_settings
 from ..db import connect
 from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, polish_insights
 from .security import validate_readonly_sql
+
+logger = logging.getLogger(__name__)
 
 
 REGIONS = ["华东", "华南", "华北", "西南"]
@@ -204,6 +210,85 @@ def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
     )
 
 
+async def _build_query_llm(question: str, dataset: dict, limit: int) -> QueryPlan | None:
+    """LLM-based text-to-SQL for complex queries beyond template coverage."""
+    settings = get_settings()
+    if not settings.llm_configured:
+        return None
+
+    columns_desc = []
+    for col in dataset["columns"]:
+        desc = col.get("description", "")
+        col_line = f"  - {col['name']} ({col['data_type']})"
+        if desc:
+            col_line += f" — {desc}"
+        if col.get("sample_value"):
+            col_line += f" [样例: {col['sample_value']}]"
+        columns_desc.append(col_line)
+
+    schema_text = (
+        f"表名: {dataset['table_name']} ({dataset['row_count']} 行)\n"
+        + "列：\n" + "\n".join(columns_desc)
+    )
+
+    prompt = (
+        "你是一个 SQLite 查询专家。根据用户问题和数据表信息生成一条只读 SELECT 查询。\n\n"
+        f"{schema_text}\n\n"
+        "要求：\n"
+        "1. 只生成 SELECT 或 WITH ... SELECT 语句\n"
+        "2. 使用参数化思维但直接输出最终 SQL（不要使用 ? 占位符）\n"
+        "3. 时间字段用 date() 函数包裹\n"
+        "4. 聚合使用 SUM/AVG/COUNT/MAX/MIN，比率用 ROUND(100.0 * SUM(A) / NULLIF(SUM(B),0), 2)\n"
+        f"5. LIMIT 不超过 {limit}\n"
+        "6. 只输出纯 SQL，不要 markdown 代码块、不要解释\n"
+        f"\n用户问题：{question}\nSQL:"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=40) as client:
+            resp = await client.post(
+                f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                json={
+                    "model": settings.llm_model,
+                    "temperature": 0.1,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            resp.raise_for_status()
+            sql = resp.json()["choices"][0]["message"]["content"].strip()
+            # Strip markdown fences
+            for prefix in ("```sql", "```"):
+                if sql.startswith(prefix):
+                    sql = sql[len(prefix):].strip()
+            if sql.endswith("```"):
+                sql = sql[:-3].strip()
+            sql = sql.rstrip(";")
+            if not sql.upper().startswith(("SELECT", "WITH")):
+                return None
+            safe = validate_readonly_sql(sql, dataset["table_name"])
+    except (httpx.HTTPError, KeyError, ValueError):
+        logger.warning("LLM SQL generation failed", exc_info=True)
+        return None
+
+    profile = _column_profile(dataset["columns"])
+    x_field = next((col["name"] for col in dataset["columns"] if col["name"] in safe.lower()), None)
+    if not x_field:
+        x_field = profile.get("first_dimension") or (dataset["columns"][0]["name"] if dataset["columns"] else "结果")
+    y_field = profile.get("sales") or profile.get("first_numeric") or "值"
+    return QueryPlan(safe, [], x_field, y_field, None, [], None)
+
+
+def _needs_complex_sql(question: str) -> bool:
+    """Detect if question likely needs JOIN/subquery/window beyond template capability."""
+    markers = (
+        "关联", "JOIN", "join", "子查询", "窗口", "排名", "rank",
+        "逐年", "同比", "环比", "滚动", "累计", "累计占比",
+        "top", "TOP", "前", "第几", "中位数", "百分位",
+        "差", "对比", "比较", "增长", "下降", "变化率",
+    )
+    return any(marker in question for marker in markers) or len(question) > 60
+
+
 def _series_label(row: dict[str, Any], series_fields: list[str]) -> str:
     return " / ".join(str(row.get(field) or "未分类") for field in series_fields)
 
@@ -280,11 +365,83 @@ def _looks_like_followup(question: str, history: list[dict[str, Any]]) -> bool:
 
 
 def _is_knowledge_question(question: str, history: list[dict[str, Any]]) -> bool:
+    """Legacy keyword fallback – retained for backward compatibility when LLM unavailable."""
     knowledge_signals = ("什么是", "如何计算", "怎么计算", "怎样计算", "口径", "定义", "含义", "业务规则", "制度", "知识库", "字段说明")
     data_signals = ("统计", "分析", "趋势", "最高", "最低", "排行", "同比", "环比", "图表", "多少")
     if any(signal in question for signal in knowledge_signals) and not any(signal in question for signal in data_signals):
         return True
     return _previous_answer_type(history) == "knowledge_qa" and _looks_like_followup(question, history)
+
+
+async def _classify_intent(question: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+    """LLM few-shot intent classification → 5 types. Falls back to keyword method.
+
+    Returns {"intent": str, "is_knowledge_qa": bool, "confidence": float, "method": str}
+    """
+    settings = get_settings()
+    if not settings.llm_configured:
+        return _classify_intent_keyword(question, history)
+
+    prompt = (
+        "你是一个数据分析意图分类器。将用户问题归类为以下 5 种意图之一：\n\n"
+        "1. data_query —— 简单数据查询，如\"各地区销售额\"、\"最近一周订单数\"\n"
+        "2. trend_analysis —— 趋势/对比分析，如\"近30天销售额趋势\"、\"各月利润变化\"\n"
+        "3. anomaly_attribution —— 异常归因，如\"为什么华东地区销售额下降\"、\"投诉率上升原因\"\n"
+        "4. knowledge_qa —— 知识问答，如\"销售额怎么计算的\"、\"投诉率的定义\"\n"
+        "5. report_generation —— 报告生成，如\"生成本月分析报告\"、\"导出Q2总结\"\n\n"
+        "示例：\n"
+        "- \"统计各地区销售额\" → data_query\n"
+        "- \"近30天销售额趋势\" → trend_analysis\n"
+        "- \"分析华东地区销售额为什么下降\" → anomaly_attribution\n"
+        "- \"投诉率如何计算\" → knowledge_qa\n"
+        "- \"帮我生成这个月的分析报告\" → report_generation\n\n"
+        "请分析以下问题，只输出 JSON：{\"intent\":\"...\",\"confidence\":0.XX}"
+        f"\n\n用户问题：{question}"
+    )
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{settings.llm_base_url.rstrip('/')}/chat/completions",
+                headers={"Authorization": f"Bearer {settings.llm_api_key}"},
+                json={
+                    "model": settings.llm_model,
+                    "temperature": 0.0,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            resp.raise_for_status()
+            raw = resp.json()["choices"][0]["message"]["content"].strip()
+            parsed = json.loads(raw)
+            intent = parsed.get("intent", "data_query")
+            confidence = float(parsed.get("confidence", 0.7))
+    except (httpx.HTTPError, KeyError, json.JSONDecodeError, ValueError):
+        logger.warning("LLM intent classification failed, falling back to keyword method", exc_info=True)
+        return _classify_intent_keyword(question, history)
+
+    knowledge_types = {"knowledge_qa"}
+    return {
+        "intent": intent,
+        "is_knowledge_qa": intent in knowledge_types,
+        "confidence": confidence,
+        "method": "llm-fewshot",
+    }
+
+
+def _classify_intent_keyword(question: str, history: list[dict[str, Any]]) -> dict[str, Any]:
+    """Keyword-based intent classification (fallback when LLM unavailable)."""
+    is_knowledge = _is_knowledge_question(question, history)
+    if is_knowledge:
+        return {"intent": "knowledge_qa", "is_knowledge_qa": True, "confidence": 0.5, "method": "keyword"}
+
+    if any(word in question for word in ("原因", "异常", "为什么", "为何")):
+        intent = "anomaly_attribution"
+    elif any(word in question for word in ("趋势", "走势", "按月", "按天", "按日", "变化")):
+        intent = "trend_analysis"
+    elif any(word in question for word in ("报告", "导出", "生成")):
+        intent = "report_generation"
+    else:
+        intent = "data_query"
+    return {"intent": intent, "is_knowledge_qa": False, "confidence": 0.5, "method": "keyword"}
 
 
 def _merge_followup(question: str, history: list[dict[str, Any]]) -> tuple[str, bool]:
@@ -377,6 +534,105 @@ async def _answer_knowledge(
     return payload
 
 
+async def _anomaly_attribution(
+    question: str,
+    dataset: dict,
+    base_plan: QueryPlan,
+    base_rows: list[dict[str, Any]],
+) -> list[str]:
+    """Multi-dimensional drill-down: compare periods and attribute changes."""
+
+    if not base_rows or not base_plan.time_description:
+        return _draft_insights(base_rows, base_plan.x_field, base_plan.y_field, base_plan.series_fields)
+
+    # 1. Build a comparison query for the previous period
+    prev_plan = _build_query(
+        question.replace(base_plan.time_description or "", f"上期{base_plan.time_description}" if base_plan.time_description else ""),
+        dataset,
+        len(base_rows) * 2,
+    )
+
+    try:
+        with connect() as conn:
+            prev_result = conn.execute(prev_plan.sql, prev_plan.params).fetchall()
+            prev_rows = [dict(row) for row in prev_result]
+    except Exception:
+        return _draft_insights(base_rows, base_plan.x_field, base_plan.y_field, base_plan.series_fields)
+
+    if not prev_rows:
+        return _draft_insights(base_rows, base_plan.x_field, base_plan.y_field, base_plan.series_fields)
+
+    # 2. Calculate totals
+    y_field = base_plan.y_field
+    current_total = sum(float(row.get(y_field, 0) or 0) for row in base_rows)
+    prev_total = sum(float(row.get(y_field, 0) or 0) for row in prev_rows)
+    if prev_total == 0:
+        return _draft_insights(base_rows, base_plan.x_field, base_plan.y_field, base_plan.series_fields)
+
+    delta_pct = round((current_total - prev_total) / prev_total * 100, 1)
+
+    # 3. Drill down by available dimensions
+    dimensions: list[tuple[str, str]] = []
+    profile = _column_profile(dataset["columns"])
+    for dim_key, label in [("region", "区域"), ("product", "产品类别"), ("channel", "渠道")]:
+        col = profile.get(dim_key)
+        if col and any(row.get(col) for row in base_rows):
+            dimensions.append((col, label))
+
+    if not dimensions:
+        return _draft_insights(base_rows, base_plan.x_field, base_plan.y_field, base_plan.series_fields)
+
+    # 4. Calculate contributions per dimension value
+    contributions: list[dict] = []
+    for dim_col, dim_label in dimensions:
+        current_by_dim: dict[str, float] = defaultdict(float)
+        prev_by_dim: dict[str, float] = defaultdict(float)
+        for row in base_rows:
+            current_by_dim[str(row.get(dim_col, "未知"))] += float(row.get(y_field, 0) or 0)
+        for row in prev_rows:
+            prev_by_dim[str(row.get(dim_col, "未知"))] += float(row.get(y_field, 0) or 0)
+
+        all_values = set(current_by_dim.keys()) | set(prev_by_dim.keys())
+        for val in all_values:
+            curr_val = current_by_dim.get(val, 0)
+            prev_val = prev_by_dim.get(val, 0)
+            if prev_val == 0:
+                continue
+            dim_delta = round((curr_val - prev_val) / prev_val * 100, 1)
+            contribution = round((curr_val - prev_val) / prev_total * 100, 1)
+            contributions.append({
+                "dimension": dim_label,
+                "value": val,
+                "current": round(curr_val, 2),
+                "previous": round(prev_val, 2),
+                "delta_pct": dim_delta,
+                "contribution_pct": contribution,
+            })
+
+    contributions.sort(key=lambda x: abs(x["contribution_pct"]), reverse=True)
+
+    # 5. Format insights
+    insights: list[str] = []
+    direction = "增长" if delta_pct > 0 else "下降"
+    insights.append(f"本期{y_field}较上期{direction}{abs(delta_pct)}%。")
+
+    if contributions:
+        top = contributions[:4]
+        for item in top:
+            dir_word = "增长" if item["delta_pct"] > 0 else "下降"
+            insights.append(
+                f"• {item['dimension']}「{item['value']}」{dir_word}{abs(item['delta_pct'])}%，"
+                f"贡献了总变化的{abs(item['contribution_pct'])}%（从{item['previous']:,.2f}→{item['current']:,.2f}）。"
+            )
+
+    # 6. Add recommendation
+    if contributions:
+        largest = contributions[0]
+        insights.append(f"建议重点关注{largest['dimension']}「{largest['value']}」的异常变化，进一步排查业务原因。")
+
+    return insights
+
+
 async def analyze(question: str, session_id: str | None, dataset_id: int | None) -> dict:
     settings = get_settings()
     session_id = session_id or uuid.uuid4().hex
@@ -384,14 +640,23 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
     effective_question, context_applied = _merge_followup(question, history)
     _store_user(session_id, question, dataset_id)
 
-    if _is_knowledge_question(question, history):
+    # ---- FR#8: LLM intent classification (with keyword fallback) ----
+    intent_result = await _classify_intent(question, history)
+
+    if intent_result["is_knowledge_qa"]:
         return await _answer_knowledge(
             question, effective_question, session_id, dataset_id, history, context_applied
         )
 
     dataset = _dataset(dataset_id)
     dataset_id = dataset["id"]
+
+    # ---- FR#10: Dual-path SQL generation (template → LLM fallback) ----
     query_plan = _build_query(effective_question, dataset, settings.query_row_limit)
+    if query_plan is None or _needs_complex_sql(effective_question):
+        llm_plan = await _build_query_llm(effective_question, dataset, settings.query_row_limit)
+        if llm_plan is not None:
+            query_plan = llm_plan
     safe_sql = validate_readonly_sql(query_plan.sql, dataset["table_name"])
     with connect() as conn:
         result = conn.execute(safe_sql, query_plan.params).fetchall()
@@ -399,9 +664,20 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
 
     knowledge = await search_knowledge(effective_question, dataset_id)
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
-    insights = await polish_insights(effective_question, rows, draft, knowledge)
+
+    # ---- FR#18: Anomaly attribution path ----
+    if intent_result["intent"] == "anomaly_attribution":
+        insights = await _anomaly_attribution(effective_question, dataset, query_plan, rows)
+    else:
+        insights = await polish_insights(effective_question, rows, draft, knowledge)
+
     is_time = query_plan.x_field in ("日期", "月份")
-    if "柱状图" in effective_question:
+    # Use LLM intent-aware chart selection
+    if intent_result["intent"] == "trend_analysis":
+        chart_type = "line"
+    elif intent_result["intent"] == "anomaly_attribution":
+        chart_type = "bar"
+    elif "柱状图" in effective_question:
         chart_type = "bar"
     elif "折线图" in effective_question:
         chart_type = "line"
@@ -409,22 +685,26 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
         chart_type = "pie"
     else:
         chart_type = "line" if is_time else ("pie" if "占比" in effective_question and len(rows) <= 8 else "bar")
-    intent = "趋势分析" if is_time else (
-        "异常归因" if "原因" in effective_question or "异常" in effective_question else "指标查询"
-    )
+    intent_user = "趋势分析" if intent_result["intent"] == "trend_analysis" else (
+        "异常归因" if intent_result["intent"] == "anomaly_attribution" else (
+        "报告生成" if intent_result["intent"] == "report_generation" else "指标查询"
+    ))
     scope_parts = [item for item in (query_plan.time_description, *query_plan.series_fields) if item]
     scope = "、".join(scope_parts) or query_plan.x_field
+    plan_steps = [
+        f"识别分析意图：{intent_user}（{intent_result['method']}，置信度 {intent_result['confidence']:.0%}）",
+        f"确定查询范围与分组：{scope}",
+        f"检索数据集与指标口径：{dataset['name']}",
+        "生成并校验只读 SQL" + ("（LLM 增强）" if intent_result.get("method") == "llm-fewshot" else ""),
+        f"执行查询并生成{chart_type}图与业务结论",
+    ]
+    if intent_result["intent"] == "anomaly_attribution":
+        plan_steps.insert(3, "异常归因：对比上期数据并逐维度下钻分析")
     payload = {
         "session_id": session_id,
         "message": "分析完成。" + (" 已继承上轮对话条件。" if context_applied else ""),
-        "intent": intent,
-        "plan": [
-            f"识别分析意图：{intent}",
-            f"确定查询范围与分组：{scope}",
-            f"检索数据集与指标口径：{dataset['name']}",
-            "生成并校验只读 SQL",
-            f"执行查询并生成{chart_type}图与业务结论",
-        ],
+        "intent": intent_user,
+        "plan": plan_steps,
         "sql": safe_sql,
         "columns": list(rows[0].keys()) if rows else [query_plan.x_field, query_plan.y_field],
         "rows": rows,

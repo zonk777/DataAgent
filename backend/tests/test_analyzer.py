@@ -1,5 +1,8 @@
+import asyncio
+
 from app.db import connect, initialize_database
-from app.services.analyzer import _build_query, _dataset
+from app.services.analyzer import _build_query, _dataset, analyze
+from app.services.intent_classifier import IntentResult
 from app.services.security import validate_readonly_sql
 
 
@@ -49,3 +52,50 @@ def test_product_typo_breakdown_is_supported() -> None:
     plan, rows = _run("分析近10天各地区销售额趋势；按展品拆分")
     assert plan.series_fields == ["区域", "产品类别"]
     assert rows
+
+
+def test_python_analysis_is_used_for_complex_trend_question(monkeypatch) -> None:
+    initialize_database()
+    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+
+    async def fake_classify_intent(question, history):
+        return IntentResult("trend_analysis", 0.99, "test", "python route")
+
+    async def fake_generate_llm_sql(question, dataset, limit):
+        return None
+
+    async def fake_polish_insights(question, rows, draft, knowledge):
+        return draft
+
+    async def fake_search_knowledge(question, dataset_id=None, limit=5):
+        return []
+
+    async def fake_execute_python_analysis(question, table_name, columns, row_count, knowledge, *, timeout=30):
+        return {
+            "success": True,
+            "error": None,
+            "traceback": None,
+            "code": "print('ok')",
+            "result": {
+                "summary": "Python 已完成同比趋势分析。",
+                "data": [{"维度": "华东", "同比": "-12.3%"}],
+                "chart_suggestion": {"type": "bar", "x": "维度", "y": "同比"},
+            },
+        }
+
+    monkeypatch.setattr("app.services.analyzer.classify_intent", fake_classify_intent)
+    monkeypatch.setattr("app.services.analyzer.generate_llm_sql", fake_generate_llm_sql)
+    monkeypatch.setattr("app.services.analyzer.polish_insights", fake_polish_insights)
+    monkeypatch.setattr("app.services.analyzer.search_knowledge", fake_search_knowledge)
+    monkeypatch.setattr("app.services.analyzer.execute_python_analysis", fake_execute_python_analysis)
+
+    payload = asyncio.run(analyze("分析销售额同比趋势", None, None))
+
+    assert payload["analysis_engine"] == "python_pandas"
+    assert payload["execution_mode"] == "llm-python-pandas"
+    assert payload["insights"] == ["Python 已完成同比趋势分析。"]
+    assert payload["rows"] == [{"维度": "华东", "同比": "-12.3%"}]
+    assert payload["chart"]["x_field"] == "维度"
+    assert payload["chart"]["y_field"] == "同比"
+    assert payload["python_code"] == "print('ok')"

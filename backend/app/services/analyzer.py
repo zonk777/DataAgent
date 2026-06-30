@@ -14,6 +14,7 @@ from .intent_classifier import IntentResult, classify_intent
 from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, polish_insights
 from .planner import build_plan_steps, plan_titles
+from .python_executor import execute_python_analysis
 from .security import validate_readonly_sql
 from .sql_generator import generate_llm_sql, query_plan_source
 
@@ -263,6 +264,53 @@ def _draft_insights(rows: list[dict[str, Any]], x_field: str, y_field: str, seri
     return insights
 
 
+def _needs_python_analysis(question: str, intent_label: str | None) -> bool:
+    python_terms = (
+        "同比",
+        "环比",
+        "异常",
+        "归因",
+        "原因",
+        "波动",
+        "下滑",
+        "下降",
+        "增长率",
+        "变化率",
+        "趋势",
+        "走势",
+        "预测",
+    )
+    if any(term in question for term in python_terms):
+        return True
+    return intent_label in {"trend_analysis", "anomaly_attribution"}
+
+
+def _python_rows(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    rows: list[dict[str, Any]] = []
+    for item in value[:50]:
+        if isinstance(item, dict):
+            rows.append({str(key): _jsonable_value(val) for key, val in item.items()})
+    return rows
+
+
+def _apply_python_chart(chart: dict[str, Any], suggestion: Any) -> dict[str, Any]:
+    if not isinstance(suggestion, dict):
+        return chart
+    allowed_types = {"bar", "line", "pie", "scatter", "none"}
+    chart_type = str(suggestion.get("type") or chart["type"]).lower()
+    if chart_type not in allowed_types:
+        chart_type = chart["type"]
+    updated = dict(chart)
+    updated["type"] = chart_type
+    updated["x_field"] = suggestion.get("x") or suggestion.get("x_field") or chart.get("x_field")
+    updated["y_field"] = suggestion.get("y") or suggestion.get("y_field") or chart.get("y_field")
+    updated["series_field"] = suggestion.get("series") or suggestion.get("series_field") or chart.get("series_field")
+    updated["series_name"] = updated["y_field"]
+    return updated
+
+
 def _load_history(session_id: str | None) -> list[dict[str, Any]]:
     if not session_id:
         return []
@@ -460,6 +508,45 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
     scope_parts = [item for item in (query_plan.time_description, *query_plan.series_fields) if item]
     scope = "、".join(scope_parts) or query_plan.x_field
     execution_mode = "llm-assisted" if settings.llm_configured else "local-demo"
+    chart = {
+        "type": chart_type,
+        "title": f"{dataset['name']} - {(query_plan.time_description + ' ') if query_plan.time_description else ''}{query_plan.y_field}",
+        "x_field": query_plan.x_field,
+        "y_field": query_plan.y_field,
+        "series_name": query_plan.y_field,
+        "series_field": query_plan.series_field,
+        "series_fields": query_plan.series_fields,
+    }
+    python_analysis: dict[str, Any] | None = None
+    python_code: str | None = None
+    analysis_engine = "sql"
+    if settings.llm_configured and _needs_python_analysis(effective_question, intent_result.label):
+        python_result = await execute_python_analysis(
+            effective_question,
+            dataset["table_name"],
+            dataset["columns"],
+            int(dataset.get("row_count") or 0),
+            knowledge,
+        )
+        python_code = python_result.get("code") or ""
+        python_payload = python_result.get("result") if isinstance(python_result.get("result"), dict) else None
+        python_analysis = {
+            "success": bool(python_result.get("success")),
+            "error": python_result.get("error"),
+            "traceback": python_result.get("traceback"),
+            "result": python_payload,
+        }
+        if python_result.get("success") and python_payload:
+            analysis_engine = "python_pandas"
+            execution_mode = "llm-python-pandas"
+            summary = python_payload.get("summary")
+            if isinstance(summary, str) and summary.strip():
+                insights = [summary.strip()]
+            generated_rows = _python_rows(python_payload.get("data"))
+            if generated_rows:
+                rows = generated_rows
+            chart = _apply_python_chart(chart, python_payload.get("chart_suggestion"))
+            chart_type = chart["type"]
     plan_steps = build_plan_steps(
         intent=intent_result,
         answer_type="data_analysis",
@@ -482,18 +569,13 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
         "sql": safe_sql,
         "columns": list(rows[0].keys()) if rows else [query_plan.x_field, query_plan.y_field],
         "rows": rows,
-        "chart": {
-            "type": chart_type,
-            "title": f"{dataset['name']} - {(query_plan.time_description + ' ') if query_plan.time_description else ''}{query_plan.y_field}",
-            "x_field": query_plan.x_field,
-            "y_field": query_plan.y_field,
-            "series_name": query_plan.y_field,
-            "series_field": query_plan.series_field,
-            "series_fields": query_plan.series_fields,
-        },
+        "chart": chart,
         "insights": insights,
         "knowledge_refs": knowledge,
         "execution_mode": execution_mode,
+        "analysis_engine": analysis_engine,
+        "python_analysis": python_analysis,
+        "python_code": python_code,
         "answer_type": "data_analysis",
         "context_applied": context_applied,
         "effective_question": effective_question,

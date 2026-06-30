@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import subprocess
+import sys
 import tempfile
 import uuid
 from pathlib import Path
@@ -155,7 +155,7 @@ with open(DATA_PATH, "r", encoding="utf-8") as _f:
 
     try:
         proc = await asyncio.create_subprocess_exec(
-            str(Path(__file__).resolve().parent.parent.parent / ".venv" / "Scripts" / "python.exe"),
+            sys.executable,
             str(script_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,

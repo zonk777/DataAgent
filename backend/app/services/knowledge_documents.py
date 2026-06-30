@@ -74,9 +74,9 @@ def import_knowledge_document(
         for index, chunk in enumerate(chunks, 1):
             chunk_title = base_title if len(chunks) == 1 else f"{base_title} - 片段 {index}"
             cursor = conn.execute(
-                "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (?, ?, ?, ?)",
+                "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (%s, %s, %s, %s)",
                 (chunk_title, chunk, category, dataset_id),
             )
-            row = conn.execute("SELECT * FROM knowledge_chunks WHERE id = ?", (cursor.lastrowid,)).fetchone()
+            row = conn.execute("SELECT * FROM knowledge_chunks WHERE id = %s", (cursor.lastrowid,)).fetchone()
             inserted.append(dict(row))
     return inserted

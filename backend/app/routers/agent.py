@@ -1,6 +1,7 @@
 import json
-import sqlite3
 import uuid
+
+import pymysql
 from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -46,7 +47,7 @@ def list_sessions(request: Request, limit: int = Query(default=30, ge=1, le=100)
                LEFT JOIN messages m ON m.session_id = s.id
                GROUP BY s.id
                ORDER BY s.updated_at DESC
-               LIMIT ?""",
+               LIMIT %s""",
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
@@ -60,7 +61,7 @@ def create_session(payload: SessionCreate, request: Request) -> dict:
     session_id = uuid.uuid4().hex
     with connect() as conn:
         conn.execute(
-            "INSERT INTO sessions(id, title, dataset_id, user_id) VALUES (?, ?, ?, ?)",
+            "INSERT INTO sessions(id, title, dataset_id, user_id) VALUES (%s, %s, %s, %s)",
             (session_id, payload.title, payload.dataset_id, actor["id"]),
         )
     return {"id": session_id, "title": payload.title, "dataset_id": payload.dataset_id}
@@ -70,11 +71,11 @@ def create_session(payload: SessionCreate, request: Request) -> dict:
 def session_detail(session_id: str, request: Request) -> dict:
     current_admin(request)
     with connect() as conn:
-        session = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        session = conn.execute("SELECT * FROM sessions WHERE id = %s", (session_id,)).fetchone()
         if not session:
             raise HTTPException(status_code=404, detail="会话不存在")
         rows = conn.execute(
-            "SELECT id, role, content, payload, created_at FROM messages WHERE session_id = ? ORDER BY id",
+            "SELECT id, role, content, payload, created_at FROM messages WHERE session_id = %s ORDER BY id",
             (session_id,),
         ).fetchall()
     result = dict(session)
@@ -91,7 +92,7 @@ def session_messages(session_id: str, request: Request) -> list[dict]:
 def delete_session(session_id: str, request: Request) -> None:
     actor = current_admin(request)
     with connect() as conn:
-        conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        conn.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
     log_action("delete_session", "session", session_id, "删除历史对话", actor=actor)
 
 
@@ -105,7 +106,7 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
         result = await analyze(payload.question, payload.session_id, dataset_id)
         log_action("analysis_request", "session", result.get("session_id"), payload.question, actor=actor)
         return result
-    except (ValueError, sqlite3.Error) as exc:
+    except (ValueError, pymysql.Error) as exc:
         log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

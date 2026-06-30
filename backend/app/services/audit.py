@@ -26,7 +26,7 @@ def log_action(
     with connect() as conn:
         conn.execute(
             """INSERT INTO audit_logs(user_id, username, action, resource_type, resource_id, detail, status)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (
                 actor.get("id") if actor else None,
                 actor.get("username") if actor else None,
@@ -50,16 +50,16 @@ def list_audit_logs(
     filters: list[str] = []
     params: list[Any] = []
     if username:
-        filters.append("username LIKE ?")
+        filters.append("username LIKE %s")
         params.append(f"%{username}%")
     if action:
-        filters.append("action = ?")
+        filters.append("action = %s")
         params.append(action)
     if date_from:
-        filters.append("date(created_at) >= date(?)")
+        filters.append("DATE(created_at) >= %s")
         params.append(date_from)
     if date_to:
-        filters.append("date(created_at) <= date(?)")
+        filters.append("DATE(created_at) <= %s")
         params.append(date_to)
     where = f"WHERE {' AND '.join(filters)}" if filters else ""
     with connect() as conn:
@@ -68,7 +68,7 @@ def list_audit_logs(
                 FROM audit_logs
                 {where}
                 ORDER BY id DESC
-                LIMIT ?""",
+                LIMIT %s""",
             (*params, limit),
         ).fetchall()
     return [dict(row) for row in rows]

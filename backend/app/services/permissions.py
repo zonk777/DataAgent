@@ -19,7 +19,7 @@ def normalize_role(role: str | None) -> str:
 def get_dataset_permissions(user_id: int) -> list[int]:
     with connect() as conn:
         rows = conn.execute(
-            "SELECT dataset_id FROM user_dataset_permissions WHERE user_id = ? ORDER BY dataset_id",
+            "SELECT dataset_id FROM user_dataset_permissions WHERE user_id = %s ORDER BY dataset_id",
             (user_id,),
         ).fetchall()
     return [int(row["dataset_id"]) for row in rows]
@@ -27,10 +27,10 @@ def get_dataset_permissions(user_id: int) -> list[int]:
 
 def set_dataset_permissions(user_id: int, dataset_ids: list[int] | None) -> None:
     with connect() as conn:
-        conn.execute("DELETE FROM user_dataset_permissions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_dataset_permissions WHERE user_id = %s", (user_id,))
         for dataset_id in dataset_ids or []:
             conn.execute(
-                "INSERT OR IGNORE INTO user_dataset_permissions(user_id, dataset_id) VALUES (?, ?)",
+                "INSERT IGNORE INTO user_dataset_permissions(user_id, dataset_id) VALUES (%s, %s)",
                 (user_id, int(dataset_id)),
             )
 
@@ -61,7 +61,7 @@ def first_accessible_dataset_id(actor: dict[str, Any]) -> int | None:
         if allowed is None:
             row = conn.execute("SELECT id FROM datasets ORDER BY id LIMIT 1").fetchone()
         elif allowed:
-            placeholders = ",".join("?" for _ in allowed)
+            placeholders = ",".join("%s" for _ in allowed)
             row = conn.execute(
                 f"SELECT id FROM datasets WHERE id IN ({placeholders}) ORDER BY id LIMIT 1",
                 allowed,

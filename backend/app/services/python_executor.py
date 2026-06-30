@@ -16,14 +16,16 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pandas as pd
 
 from ..config import get_settings
+from ..db import _engine
 
 # ---------------------------------------------------------------------------
 # Import whitelist – only pandas / numpy are permitted
 # ---------------------------------------------------------------------------
 _ALLOWED_IMPORTS = {"pandas", "numpy", "math", "json", "datetime", "collections", "itertools", "functools", "statistics", "re", "decimal", "fractions", "random", "operator", "typing"}
-_BLOCKED_MODULES = {"os", "sys", "subprocess", "shutil", "socket", "http", "urllib", "requests", "httpx", "openpyxl", "sqlite3", "psycopg2", "pymysql", "pickle", "marshal", "ctypes", "importlib", "compileall", "code", "codeop", "pty", "fcntl", "tty", "pdb", "traceback", "inspect"}
+_BLOCKED_MODULES = {"os", "sys", "subprocess", "shutil", "socket", "http", "urllib", "requests", "httpx", "openpyxl", "psycopg2", "pymysql", "pickle", "marshal", "ctypes", "importlib", "compileall", "code", "codeop", "pty", "fcntl", "tty", "pdb", "traceback", "inspect"}
 
 
 def _validate_imports(code: str) -> None:
@@ -122,23 +124,26 @@ async def _generate_python_code(
 async def _run_sandbox(
     code: str,
     table_name: str,
-    database_path: str,
+    data_json_path: str,
     timeout: int = 30,
 ) -> dict[str, Any]:
-    """Execute a Pandas script in an isolated subprocess."""
+    """Execute a Pandas script in an isolated subprocess.
+
+    Data is passed as a JSON file to avoid granting the sandbox database access.
+    """
     _validate_imports(code)
 
     wrapper = f"""
-import json, sqlite3, warnings
+import json, warnings
 warnings.filterwarnings("ignore")
 import pandas as pd
 import numpy as np
 
-DB_PATH = {json.dumps(str(database_path))}
 TABLE_NAME = {json.dumps(table_name)}
+DATA_PATH = {json.dumps(data_json_path)}
 
-with sqlite3.connect(DB_PATH) as _conn:
-    df = pd.read_sql(f"SELECT * FROM {{TABLE_NAME}}", _conn)
+with open(DATA_PATH, "r", encoding="utf-8") as _f:
+    df = pd.read_json(_f, orient="records")
 
 # ---- 用户代码 ----
 {code}
@@ -229,6 +234,21 @@ async def execute_python_analysis(
     except RuntimeError as exc:
         return {"success": False, "error": str(exc), "traceback": None, "result": None, "code": ""}
 
-    result = await _run_sandbox(code, table_name, str(settings.database_file), timeout)
+    # Load data from MySQL and dump to a temp JSON file for the sandbox
+    df = pd.read_sql_query(f"SELECT * FROM `{table_name}`", _engine())
+    tmp_data_file = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".json", delete=False, encoding="utf-8", prefix="dataagent_data_"
+    )
+    df.to_json(tmp_data_file, orient="records", force_ascii=False)
+    tmp_data_file.close()
+
+    try:
+        result = await _run_sandbox(code, table_name, tmp_data_file.name, timeout)
+    finally:
+        try:
+            Path(tmp_data_file.name).unlink(missing_ok=True)
+        except Exception:
+            pass
+
     result["code"] = code
     return result

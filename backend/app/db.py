@@ -2,124 +2,170 @@ from __future__ import annotations
 
 import math
 import random
-import sqlite3
 from contextlib import contextmanager
 from datetime import date, timedelta
 from typing import Iterator
 
+import pymysql
+from pymysql.cursors import DictCursor
+from sqlalchemy import create_engine
+
 from .config import get_settings
 
 
-SCHEMA = """
-PRAGMA journal_mode=WAL;
-PRAGMA foreign_keys=ON;
+class _MysqlWrapper:
+    """Thin wrapper to make pymysql behave like sqlite3.Connection for minimal code changes."""
 
-CREATE TABLE IF NOT EXISTS datasets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    source_type TEXT NOT NULL,
-    table_name TEXT NOT NULL UNIQUE,
-    row_count INTEGER NOT NULL DEFAULT 0,
-    column_count INTEGER NOT NULL DEFAULT 0,
-    status TEXT NOT NULL DEFAULT 'ready',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+    def __init__(self, conn: pymysql.Connection):
+        self._conn = conn
 
-CREATE TABLE IF NOT EXISTS dataset_columns (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
-    name TEXT NOT NULL,
-    data_type TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    sample_value TEXT,
-    null_rate REAL NOT NULL DEFAULT 0,
-    UNIQUE(dataset_id, name)
-);
+    def execute(self, sql: str, params=None):
+        cursor = self._conn.cursor()
+        cursor.execute(sql, params)
+        return cursor
 
-CREATE TABLE IF NOT EXISTS knowledge_chunks (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    title TEXT NOT NULL,
-    content TEXT NOT NULL,
-    category TEXT NOT NULL DEFAULT 'business_rule',
-    dataset_id INTEGER REFERENCES datasets(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+    def executemany(self, sql: str, seq_of_params):
+        cursor = self._conn.cursor()
+        cursor.executemany(sql, seq_of_params)
+        return cursor
 
-CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    title TEXT NOT NULL,
-    dataset_id INTEGER REFERENCES datasets(id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+    def commit(self):
+        self._conn.commit()
 
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
-    content TEXT NOT NULL,
-    payload TEXT,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+    def rollback(self):
+        self._conn.rollback()
 
-CREATE TABLE IF NOT EXISTS audit_logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER,
-    username TEXT,
-    action TEXT NOT NULL,
-    resource_type TEXT NOT NULL,
-    resource_id TEXT,
-    detail TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL DEFAULT 'success',
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+    def close(self):
+        self._conn.close()
 
-CREATE TABLE IF NOT EXISTS admin_users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    role TEXT NOT NULL DEFAULT 'admin',
-    is_initial_admin INTEGER NOT NULL DEFAULT 0,
-    created_by INTEGER REFERENCES admin_users(id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
 
-CREATE TABLE IF NOT EXISTS user_dataset_permissions (
-    user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
-    dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
-    PRIMARY KEY(user_id, dataset_id)
-);
-
-CREATE TABLE IF NOT EXISTS admin_sessions (
-    token TEXT PRIMARY KEY,
-    admin_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
-    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    expires_at TEXT NOT NULL
-);
-"""
+SCHEMA = [
+    """CREATE TABLE IF NOT EXISTS datasets (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        name VARCHAR(255) NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        source_type VARCHAR(32) NOT NULL,
+        table_name VARCHAR(128) NOT NULL UNIQUE,
+        row_count INT NOT NULL DEFAULT 0,
+        column_count INT NOT NULL DEFAULT 0,
+        status VARCHAR(32) NOT NULL DEFAULT 'ready',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS dataset_columns (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        dataset_id INT NOT NULL,
+        name VARCHAR(128) NOT NULL,
+        data_type VARCHAR(32) NOT NULL,
+        description TEXT NOT NULL DEFAULT '',
+        sample_value TEXT,
+        null_rate DOUBLE NOT NULL DEFAULT 0,
+        UNIQUE(dataset_id, name),
+        FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS knowledge_chunks (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        content TEXT NOT NULL,
+        category VARCHAR(64) NOT NULL DEFAULT 'business_rule',
+        dataset_id INT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS sessions (
+        id VARCHAR(64) PRIMARY KEY,
+        title VARCHAR(255) NOT NULL,
+        dataset_id INT,
+        user_id INT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE SET NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS messages (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        session_id VARCHAR(64) NOT NULL,
+        role VARCHAR(16) NOT NULL,
+        content TEXT NOT NULL,
+        payload TEXT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS audit_logs (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        user_id INT,
+        username VARCHAR(128),
+        action VARCHAR(64) NOT NULL,
+        resource_type VARCHAR(64) NOT NULL,
+        resource_id VARCHAR(128),
+        detail TEXT NOT NULL DEFAULT '',
+        status VARCHAR(32) NOT NULL DEFAULT 'success',
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+    )""",
+    """CREATE TABLE IF NOT EXISTS admin_users (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        username VARCHAR(128) NOT NULL UNIQUE,
+        password_hash VARCHAR(255) NOT NULL,
+        role VARCHAR(32) NOT NULL DEFAULT 'admin',
+        is_initial_admin TINYINT NOT NULL DEFAULT 0,
+        created_by INT,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (created_by) REFERENCES admin_users(id) ON DELETE SET NULL
+    )""",
+    """CREATE TABLE IF NOT EXISTS user_dataset_permissions (
+        user_id INT NOT NULL,
+        dataset_id INT NOT NULL,
+        PRIMARY KEY(user_id, dataset_id),
+        FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
+        FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+    )""",
+    """CREATE TABLE IF NOT EXISTS admin_sessions (
+        token VARCHAR(255) PRIMARY KEY,
+        admin_id INT NOT NULL,
+        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        expires_at DATETIME NOT NULL,
+        FOREIGN KEY (admin_id) REFERENCES admin_users(id) ON DELETE CASCADE
+    )""",
+]
 
 
 @contextmanager
-def connect() -> Iterator[sqlite3.Connection]:
+def connect() -> Iterator[_MysqlWrapper]:
     settings = get_settings()
-    settings.database_file.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(settings.database_file, timeout=settings.sql_timeout_seconds)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
+    conn = pymysql.connect(
+        host=settings.mysql_host,
+        port=settings.mysql_port,
+        user=settings.mysql_user,
+        password=settings.mysql_password,
+        database=settings.mysql_database,
+        charset="utf8mb4",
+        cursorclass=DictCursor,
+        connect_timeout=settings.sql_timeout_seconds,
+    )
+    wrapped = _MysqlWrapper(conn)
     try:
-        yield conn
-        conn.commit()
+        yield wrapped
+        wrapped.commit()
     except Exception:
-        conn.rollback()
+        wrapped.rollback()
         raise
     finally:
-        conn.close()
+        wrapped.close()
+
+
+def _engine():
+    """SQLAlchemy engine for pandas to_sql / read_sql operations."""
+    settings = get_settings()
+    url = (
+        f"mysql+pymysql://{settings.mysql_user}:{settings.mysql_password}"
+        f"@{settings.mysql_host}:{settings.mysql_port}/{settings.mysql_database}"
+        "?charset=utf8mb4"
+    )
+    return create_engine(url)
 
 
 def initialize_database() -> None:
     with connect() as conn:
-        conn.executescript(SCHEMA)
+        for stmt in SCHEMA:
+            conn.execute(stmt)
         _migrate_schema(conn)
         _seed_initial_admin(conn)
         exists = conn.execute("SELECT id FROM datasets LIMIT 1").fetchone()
@@ -127,57 +173,59 @@ def initialize_database() -> None:
             _seed_demo_dataset(conn)
 
 
-def _has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
-    return any(row["name"] == column for row in conn.execute(f"PRAGMA table_info({table})").fetchall())
+def _has_column(conn: _MysqlWrapper, table: str, column: str) -> bool:
+    return conn.execute(f"SHOW COLUMNS FROM `{table}` LIKE %s", (column,)).fetchone() is not None
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
-    """Apply lightweight SQLite migrations for existing local development databases."""
+def _migrate_schema(conn: _MysqlWrapper) -> None:
+    """Apply lightweight MySQL migrations for existing databases."""
     if not _has_column(conn, "admin_users", "role"):
-        conn.execute("ALTER TABLE admin_users ADD COLUMN role TEXT NOT NULL DEFAULT 'admin'")
+        conn.execute("ALTER TABLE admin_users ADD COLUMN role VARCHAR(32) NOT NULL DEFAULT 'admin'")
     if not _has_column(conn, "audit_logs", "user_id"):
-        conn.execute("ALTER TABLE audit_logs ADD COLUMN user_id INTEGER")
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN user_id INT")
     if not _has_column(conn, "audit_logs", "username"):
-        conn.execute("ALTER TABLE audit_logs ADD COLUMN username TEXT")
+        conn.execute("ALTER TABLE audit_logs ADD COLUMN username VARCHAR(128)")
     if not _has_column(conn, "sessions", "user_id"):
-        conn.execute("ALTER TABLE sessions ADD COLUMN user_id INTEGER")
+        conn.execute("ALTER TABLE sessions ADD COLUMN user_id INT")
     conn.execute(
         """CREATE TABLE IF NOT EXISTS user_dataset_permissions (
-            user_id INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
-            dataset_id INTEGER NOT NULL REFERENCES datasets(id) ON DELETE CASCADE,
-            PRIMARY KEY(user_id, dataset_id)
+            user_id INT NOT NULL,
+            dataset_id INT NOT NULL,
+            PRIMARY KEY(user_id, dataset_id),
+            FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE,
+            FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
         )"""
     )
     conn.execute("UPDATE admin_users SET role = 'initial_admin' WHERE is_initial_admin = 1")
     conn.execute("UPDATE admin_users SET role = 'admin' WHERE role IS NULL OR role = ''")
 
 
-def _seed_initial_admin(conn: sqlite3.Connection) -> None:
-    exists = conn.execute("SELECT id FROM admin_users WHERE username = ?", ("liuze",)).fetchone()
+def _seed_initial_admin(conn: _MysqlWrapper) -> None:
+    exists = conn.execute("SELECT id FROM admin_users WHERE username = %s", ("liuze",)).fetchone()
     if exists:
         return
     from .services.auth import hash_password
 
     conn.execute(
-        "INSERT INTO admin_users(username, password_hash, role, is_initial_admin) VALUES (?, ?, 'initial_admin', 1)",
+        "INSERT INTO admin_users(username, password_hash, role, is_initial_admin) VALUES (%s, %s, 'initial_admin', 1)",
         ("liuze", hash_password("18437431")),
     )
 
 
-def _seed_demo_dataset(conn: sqlite3.Connection) -> None:
+def _seed_demo_dataset(conn: _MysqlWrapper) -> None:
     table_name = "data_demo_sales"
     conn.execute(
         f"""CREATE TABLE {table_name} (
-            order_date TEXT NOT NULL,
-            region TEXT NOT NULL,
-            product_category TEXT NOT NULL,
-            channel TEXT NOT NULL,
-            sales_amount REAL NOT NULL,
-            order_count INTEGER NOT NULL,
-            profit REAL NOT NULL,
-            complaint_count INTEGER NOT NULL,
-            visits INTEGER NOT NULL,
-            conversions INTEGER NOT NULL
+            order_date VARCHAR(16) NOT NULL,
+            region VARCHAR(16) NOT NULL,
+            product_category VARCHAR(32) NOT NULL,
+            channel VARCHAR(32) NOT NULL,
+            sales_amount DOUBLE NOT NULL,
+            order_count INT NOT NULL,
+            profit DOUBLE NOT NULL,
+            complaint_count INT NOT NULL,
+            visits INT NOT NULL,
+            conversions INT NOT NULL
         )"""
     )
 
@@ -206,12 +254,12 @@ def _seed_demo_dataset(conn: sqlite3.Connection) -> None:
             rows.append((current.isoformat(), region, category, channel, sales, orders, profit, complaints, visits, conversions))
 
     conn.executemany(
-        f"INSERT INTO {table_name} VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        f"INSERT INTO {table_name} VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
         rows,
     )
     cursor = conn.execute(
         """INSERT INTO datasets(name, description, source_type, table_name, row_count, column_count)
-           VALUES (?, ?, ?, ?, ?, ?)""",
+           VALUES (%s, %s, %s, %s, %s, %s)""",
         ("企业经营演示数据", "近 120 天区域、品类、渠道经营指标", "demo", table_name, len(rows), 10),
     )
     dataset_id = cursor.lastrowid
@@ -229,7 +277,7 @@ def _seed_demo_dataset(conn: sqlite3.Connection) -> None:
     ]
     conn.executemany(
         """INSERT INTO dataset_columns(dataset_id, name, data_type, description, sample_value)
-           VALUES (?, ?, ?, ?, ?)""",
+           VALUES (%s, %s, %s, %s, %s)""",
         [(dataset_id, *column) for column in columns],
     )
     knowledge = [
@@ -240,6 +288,6 @@ def _seed_demo_dataset(conn: sqlite3.Connection) -> None:
         ("异常判断规则", "指标较前一可比周期偏离 15% 以上时，应提示业务人员进一步核查。", "business_rule", dataset_id),
     ]
     conn.executemany(
-        "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (?, ?, ?, ?)",
+        "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (%s, %s, %s, %s)",
         knowledge,
     )

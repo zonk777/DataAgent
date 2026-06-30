@@ -10,7 +10,7 @@ import pandas as pd
 from fastapi import UploadFile
 
 from ..config import get_settings
-from ..db import connect
+from ..db import _engine, connect
 from .security import safe_identifier
 
 
@@ -18,7 +18,7 @@ NUMERIC_TYPE_TOKENS = ("int", "float", "double", "decimal", "real", "numeric", "
 
 
 def _quote_identifier(name: str) -> str:
-    return '"' + name.replace('"', '""') + '"'
+    return "`" + name.replace("`", "``") + "`"
 
 
 def _read_file_frame(filename: str | None, content: bytes) -> pd.DataFrame:
@@ -65,10 +65,10 @@ def _store_frame(
 ) -> dict:
     table_name = f"data_{uuid.uuid4().hex[:12]}"
     with connect() as conn:
-        frame.to_sql(table_name, conn, index=False, if_exists="fail")
+        frame.to_sql(table_name, _engine(), index=False, if_exists="fail")
         cursor = conn.execute(
             """INSERT INTO datasets(name, description, source_type, table_name, row_count, column_count)
-               VALUES (?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s)""",
             (name, description, source_type, table_name, len(frame), len(frame.columns)),
         )
         dataset_id = int(cursor.lastrowid)
@@ -78,7 +78,7 @@ def _store_frame(
             null_rate = round(float(series.isna().mean()), 4)
             conn.execute(
                 """INSERT INTO dataset_columns(dataset_id, name, data_type, description, sample_value, null_rate)
-                   VALUES (?, ?, ?, ?, ?, ?)""",
+                   VALUES (%s, %s, %s, %s, %s, %s)""",
                 (dataset_id, str(column), str(series.dtype), original, sample, null_rate),
             )
     return get_dataset(dataset_id)
@@ -137,7 +137,7 @@ def list_datasets(allowed_ids: list[int] | None = None) -> list[dict]:
         if allowed_ids is None:
             rows = conn.execute("SELECT * FROM datasets ORDER BY id DESC").fetchall()
         elif allowed_ids:
-            placeholders = ",".join("?" for _ in allowed_ids)
+            placeholders = ",".join("%s" for _ in allowed_ids)
             rows = conn.execute(
                 f"SELECT * FROM datasets WHERE id IN ({placeholders}) ORDER BY id DESC",
                 allowed_ids,
@@ -149,29 +149,29 @@ def list_datasets(allowed_ids: list[int] | None = None) -> list[dict]:
 
 def get_dataset(dataset_id: int) -> dict:
     with connect() as conn:
-        row = conn.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+        row = conn.execute("SELECT * FROM datasets WHERE id = %s", (dataset_id,)).fetchone()
         if not row:
             raise ValueError("数据集不存在")
         result = dict(row)
         result["columns"] = [
             dict(item)
             for item in conn.execute(
-                "SELECT name, data_type, description, sample_value, null_rate FROM dataset_columns WHERE dataset_id = ? ORDER BY id",
+                "SELECT name, data_type, description, sample_value, null_rate FROM dataset_columns WHERE dataset_id = %s ORDER BY id",
                 (dataset_id,),
             ).fetchall()
         ]
-        preview = conn.execute(f"SELECT * FROM {result['table_name']} LIMIT 100").fetchall()
+        preview = conn.execute(f"SELECT * FROM `{result['table_name']}` LIMIT 100").fetchall()
         result["preview"] = [dict(item) for item in preview]
         return result
 
 
 def update_dataset(dataset_id: int, name: str, description: str) -> dict:
     with connect() as conn:
-        row = conn.execute("SELECT id FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+        row = conn.execute("SELECT id FROM datasets WHERE id = %s", (dataset_id,)).fetchone()
         if not row:
             raise ValueError("数据集不存在")
         conn.execute(
-            "UPDATE datasets SET name = ?, description = ? WHERE id = ?",
+            "UPDATE datasets SET name = %s, description = %s WHERE id = %s",
             (name.strip(), description, dataset_id),
         )
     return get_dataset(dataset_id)
@@ -180,13 +180,13 @@ def update_dataset(dataset_id: int, name: str, description: str) -> dict:
 def update_column_description(dataset_id: int, column_name: str, description: str) -> dict:
     with connect() as conn:
         row = conn.execute(
-            "SELECT id FROM dataset_columns WHERE dataset_id = ? AND name = ?",
+            "SELECT id FROM dataset_columns WHERE dataset_id = %s AND name = %s",
             (dataset_id, column_name),
         ).fetchone()
         if not row:
             raise ValueError("字段不存在")
         conn.execute(
-            "UPDATE dataset_columns SET description = ? WHERE dataset_id = ? AND name = ?",
+            "UPDATE dataset_columns SET description = %s WHERE dataset_id = %s AND name = %s",
             (description, dataset_id, column_name),
         )
     return get_dataset(dataset_id)
@@ -194,12 +194,12 @@ def update_column_description(dataset_id: int, column_name: str, description: st
 
 def delete_dataset(dataset_id: int) -> None:
     with connect() as conn:
-        row = conn.execute("SELECT table_name FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+        row = conn.execute("SELECT table_name FROM datasets WHERE id = %s", (dataset_id,)).fetchone()
         if not row:
             raise ValueError("数据集不存在")
         table_name = row["table_name"]
-        conn.execute(f"DROP TABLE IF EXISTS {table_name}")
-        conn.execute("DELETE FROM datasets WHERE id = ?", (dataset_id,))
+        conn.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+        conn.execute("DELETE FROM datasets WHERE id = %s", (dataset_id,))
 
 
 def dataset_quality(dataset_id: int) -> dict[str, Any]:
@@ -207,14 +207,14 @@ def dataset_quality(dataset_id: int) -> dict[str, Any]:
     columns = dataset.get("columns", [])
     table_name = dataset["table_name"]
     with connect() as conn:
-        row_count = int(conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0])
+        row_count = int(conn.execute(f"SELECT COUNT(*) FROM `{table_name}`").fetchone()[0])
         missing = []
         for column in columns:
             name = column["name"]
             quoted_name = _quote_identifier(name)
             missing_count = int(
                 conn.execute(
-                    f"SELECT COUNT(*) FROM {table_name} WHERE {quoted_name} IS NULL OR TRIM(CAST({quoted_name} AS TEXT)) = ''"
+                    f"SELECT COUNT(*) FROM `{table_name}` WHERE {quoted_name} IS NULL OR TRIM(CAST({quoted_name} AS CHAR)) = ''"
                 ).fetchone()[0]
             )
             missing.append(
@@ -227,12 +227,12 @@ def dataset_quality(dataset_id: int) -> dict[str, Any]:
         if columns:
             group_columns = ", ".join(_quote_identifier(column["name"]) for column in columns)
             duplicate_row = conn.execute(
-                f"SELECT COALESCE(SUM(cnt - 1), 0) FROM (SELECT COUNT(*) AS cnt FROM {table_name} GROUP BY {group_columns} HAVING cnt > 1)"
+                f"SELECT COALESCE(SUM(cnt - 1), 0) FROM (SELECT COUNT(*) AS cnt FROM `{table_name}` GROUP BY {group_columns} HAVING cnt > 1)"
             ).fetchone()
             duplicate_rows = int(duplicate_row[0] or 0)
         else:
             duplicate_rows = 0
-        frame = pd.read_sql_query(f"SELECT * FROM {table_name}", conn)
+        frame = pd.read_sql_query(f"SELECT * FROM `{table_name}`", _engine())
 
     outliers = []
     for column in columns:

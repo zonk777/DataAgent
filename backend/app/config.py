@@ -17,7 +17,14 @@ class Settings(BaseSettings):
     app_name: str = "DataAgent"
     environment: str = "development"
     secret_key: str = "development-only-change-me"
-    database_path: str = "storage/data_agent.db"
+
+    # MySQL 连接配置
+    mysql_host: str = "127.0.0.1"
+    mysql_port: int = 3306
+    mysql_user: str = "root"
+    mysql_password: str = ""
+    mysql_database: str = "dataagent"
+
     frontend_origin: str = "http://localhost:5173"
 
     llm_api_key: str = ""
@@ -33,11 +40,6 @@ class Settings(BaseSettings):
     max_upload_mb: int = Field(default=100, ge=1, le=200)
     query_row_limit: int = Field(default=500, ge=10, le=5000)
     sql_timeout_seconds: int = Field(default=15, ge=1, le=120)
-
-    @property
-    def database_file(self) -> Path:
-        path = Path(self.database_path)
-        return path if path.is_absolute() else BACKEND_DIR / path
 
     @property
     def llm_configured(self) -> bool:

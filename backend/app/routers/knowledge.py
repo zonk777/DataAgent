@@ -18,12 +18,12 @@ def list_knowledge(dataset_id: int | None = None, actor: dict | None = None) -> 
     allowed = accessible_dataset_ids(actor) if actor else None
     params: list[int] = []
     if dataset_id:
-        where = "WHERE dataset_id = ? OR dataset_id IS NULL"
+        where = "WHERE dataset_id = %s OR dataset_id IS NULL"
         params.append(dataset_id)
     elif allowed is None:
         where = ""
     elif allowed:
-        placeholders = ",".join("?" for _ in allowed)
+        placeholders = ",".join("%s" for _ in allowed)
         where = f"WHERE dataset_id IS NULL OR dataset_id IN ({placeholders})"
         params.extend(allowed)
     else:
@@ -45,10 +45,10 @@ async def create_knowledge(payload: KnowledgeCreate, request: Request) -> dict:
         ensure_dataset_access(actor, payload.dataset_id)
     with connect() as conn:
         cursor = conn.execute(
-            "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (?, ?, ?, ?)",
+            "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (%s, %s, %s, %s)",
             (payload.title, payload.content, payload.category, payload.dataset_id),
         )
-        row = conn.execute("SELECT * FROM knowledge_chunks WHERE id = ?", (cursor.lastrowid,)).fetchone()
+        row = conn.execute("SELECT * FROM knowledge_chunks WHERE id = %s", (cursor.lastrowid,)).fetchone()
     result = dict(row)
     try:
         index_status = await sync_knowledge()
@@ -109,14 +109,14 @@ async def update_knowledge(knowledge_id: int, payload: KnowledgeUpdate, request:
     if payload.dataset_id:
         ensure_dataset_access(actor, payload.dataset_id)
     with connect() as conn:
-        row = conn.execute("SELECT id FROM knowledge_chunks WHERE id = ?", (knowledge_id,)).fetchone()
+        row = conn.execute("SELECT id FROM knowledge_chunks WHERE id = %s", (knowledge_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="知识片段不存在")
         conn.execute(
-            "UPDATE knowledge_chunks SET title = ?, content = ?, category = ?, dataset_id = ? WHERE id = ?",
+            "UPDATE knowledge_chunks SET title = %s, content = %s, category = %s, dataset_id = %s WHERE id = %s",
             (payload.title, payload.content, payload.category, payload.dataset_id, knowledge_id),
         )
-        updated = conn.execute("SELECT * FROM knowledge_chunks WHERE id = ?", (knowledge_id,)).fetchone()
+        updated = conn.execute("SELECT * FROM knowledge_chunks WHERE id = %s", (knowledge_id,)).fetchone()
     try:
         await sync_knowledge(force=True)
     except VectorStoreError:
@@ -128,12 +128,12 @@ async def update_knowledge(knowledge_id: int, payload: KnowledgeUpdate, request:
 def delete_knowledge(knowledge_id: int, request: Request | None = None) -> None:
     actor = require_data_manager(request) if request else None
     with connect() as conn:
-        row = conn.execute("SELECT id, title, dataset_id FROM knowledge_chunks WHERE id = ?", (knowledge_id,)).fetchone()
+        row = conn.execute("SELECT id, title, dataset_id FROM knowledge_chunks WHERE id = %s", (knowledge_id,)).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="知识片段不存在")
         if actor and row["dataset_id"]:
             ensure_dataset_access(actor, int(row["dataset_id"]))
-        conn.execute("DELETE FROM knowledge_chunks WHERE id = ?", (knowledge_id,))
+        conn.execute("DELETE FROM knowledge_chunks WHERE id = %s", (knowledge_id,))
         try:
             delete_knowledge_vectors([knowledge_id])
         except VectorStoreError:

@@ -46,13 +46,13 @@ class ReportData:
 
 def load_report_data(session_id: str) -> ReportData:
     with connect() as conn:
-        session = conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        session = conn.execute("SELECT * FROM sessions WHERE id = %s", (session_id,)).fetchone()
         if not session:
             raise LookupError("会话不存在")
         assistant = conn.execute(
             """SELECT id, content, payload, created_at
                FROM messages
-               WHERE session_id = ? AND role = 'assistant' AND payload IS NOT NULL
+               WHERE session_id = %s AND role = 'assistant' AND payload IS NOT NULL
                ORDER BY id DESC LIMIT 1""",
             (session_id,),
         ).fetchone()
@@ -61,7 +61,7 @@ def load_report_data(session_id: str) -> ReportData:
         user = conn.execute(
             """SELECT content
                FROM messages
-               WHERE session_id = ? AND role = 'user' AND id < ?
+               WHERE session_id = %s AND role = 'user' AND id < %s
                ORDER BY id DESC LIMIT 1""",
             (session_id, assistant["id"]),
         ).fetchone()

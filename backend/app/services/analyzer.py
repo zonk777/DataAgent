@@ -37,13 +37,13 @@ class QueryPlan:
 def _dataset(dataset_id: int | None) -> dict:
     with connect() as conn:
         if dataset_id:
-            row = conn.execute("SELECT * FROM datasets WHERE id = ?", (dataset_id,)).fetchone()
+            row = conn.execute("SELECT * FROM datasets WHERE id = %s", (dataset_id,)).fetchone()
         else:
             row = conn.execute("SELECT * FROM datasets ORDER BY id LIMIT 1").fetchone()
         columns = [] if not row else [
             dict(item)
             for item in conn.execute(
-                "SELECT name, data_type, description FROM dataset_columns WHERE dataset_id = ? ORDER BY id",
+                "SELECT name, data_type, description FROM dataset_columns WHERE dataset_id = %s ORDER BY id",
                 (row["id"],),
             ).fetchall()
         ]
@@ -120,19 +120,19 @@ def _time_filter(question: str, date_column: str | None, table_name: str) -> tup
     if not date_column:
         return [], [], None
     match = re.search(r"(?:近|最近)\s*(\d+)\s*(天|日|周|个月|月)", question)
-    max_date = f"(SELECT MAX(date({date_column})) FROM {table_name})"
+    max_date = f"(SELECT MAX(DATE({date_column})) FROM {table_name})"
     if match:
         amount = max(1, int(match.group(1)))
         unit = match.group(2)
         if unit in ("天", "日"):
-            return [f"date({date_column}) >= date({max_date}, ?)"], [f"-{amount - 1} days"], f"近{amount}天"
+            return [f"DATE({date_column}) >= DATE_SUB({max_date}, INTERVAL %s DAY)"], [amount - 1], f"近{amount}天"
         if unit == "周":
-            return [f"date({date_column}) >= date({max_date}, ?)"], [f"-{amount * 7 - 1} days"], f"近{amount}周"
-        return [f"date({date_column}) >= date({max_date}, 'start of month', ?)"], [f"-{amount - 1} months"], f"近{amount}个月"
+            return [f"DATE({date_column}) >= DATE_SUB({max_date}, INTERVAL %s DAY)"], [amount * 7 - 1], f"近{amount}周"
+        return [f"DATE({date_column}) >= DATE_SUB(DATE_FORMAT({max_date}, '%Y-%m-01'), INTERVAL %s MONTH)"], [amount - 1], f"近{amount}个月"
     if "本月" in question:
-        return [f"date({date_column}) >= date({max_date}, 'start of month')"], [], "本月"
+        return [f"DATE({date_column}) >= DATE_FORMAT({max_date}, '%Y-%m-01')"], [], "本月"
     if "今年" in question or "本年" in question:
-        return [f"strftime('%Y', {date_column}) = strftime('%Y', {max_date})"], [], "本年"
+        return [f"YEAR({date_column}) = YEAR({max_date})"], [], "本年"
     return [], [], None
 
 
@@ -159,7 +159,7 @@ def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
     filters, params, time_description = _time_filter(question, profile["date"], table_name)
     for region in REGIONS:
         if region in question and profile["region"]:
-            filters.append(f"{profile['region']} = ?")
+            filters.append(f"{profile['region']} = %s")
             params.append(region)
 
     breakdowns = _breakdowns(question, profile)
@@ -170,9 +170,9 @@ def _build_query(question: str, dataset: dict, limit: int) -> QueryPlan:
     )
     if is_time_series:
         if is_monthly:
-            x_sql, x_field = f"strftime('%Y-%m', {profile['date']})", "月份"
+            x_sql, x_field = f"DATE_FORMAT({profile['date']}, '%Y-%m')", "月份"
         else:
-            x_sql, x_field = f"date({profile['date']})", "日期"
+            x_sql, x_field = f"DATE({profile['date']})", "日期"
         series_dimensions = breakdowns
     else:
         if breakdowns:
@@ -232,12 +232,12 @@ async def _build_query_llm(question: str, dataset: dict, limit: int) -> QueryPla
     )
 
     prompt = (
-        "你是一个 SQLite 查询专家。根据用户问题和数据表信息生成一条只读 SELECT 查询。\n\n"
+        "你是一个 MySQL 查询专家。根据用户问题和数据表信息生成一条只读 SELECT 查询。\n\n"
         f"{schema_text}\n\n"
         "要求：\n"
         "1. 只生成 SELECT 或 WITH ... SELECT 语句\n"
-        "2. 使用参数化思维但直接输出最终 SQL（不要使用 ? 占位符）\n"
-        "3. 时间字段用 date() 函数包裹\n"
+        "2. 使用参数化思维但直接输出最终 SQL（不要使用 %s 占位符）\n"
+        "3. 时间字段用 DATE() 函数包裹，月份聚合用 DATE_FORMAT(col, '%Y-%m')\n"
         "4. 聚合使用 SUM/AVG/COUNT/MAX/MIN，比率用 ROUND(100.0 * SUM(A) / NULLIF(SUM(B),0), 2)\n"
         f"5. LIMIT 不超过 {limit}\n"
         "6. 只输出纯 SQL，不要 markdown 代码块、不要解释\n"
@@ -323,7 +323,7 @@ def _load_history(session_id: str | None) -> list[dict[str, Any]]:
         return []
     with connect() as conn:
         rows = conn.execute(
-            "SELECT id, role, content, payload, created_at FROM messages WHERE session_id = ? ORDER BY id",
+            "SELECT id, role, content, payload, created_at FROM messages WHERE session_id = %s ORDER BY id",
             (session_id,),
         ).fetchall()
     history = []
@@ -469,30 +469,30 @@ def _merge_followup(question: str, history: list[dict[str, Any]]) -> tuple[str, 
 
 def _store_user(session_id: str, question: str, dataset_id: int | None) -> None:
     with connect() as conn:
-        session = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        session = conn.execute("SELECT id FROM sessions WHERE id = %s", (session_id,)).fetchone()
         if not session:
             conn.execute(
-                "INSERT INTO sessions(id, title, dataset_id) VALUES (?, ?, ?)",
+                "INSERT INTO sessions(id, title, dataset_id) VALUES (%s, %s, %s)",
                 (session_id, question[:40], dataset_id),
             )
         elif dataset_id is not None:
-            conn.execute("UPDATE sessions SET dataset_id = ? WHERE id = ?", (dataset_id, session_id))
-        conn.execute("INSERT INTO messages(session_id, role, content) VALUES (?, 'user', ?)", (session_id, question))
-        conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+            conn.execute("UPDATE sessions SET dataset_id = %s WHERE id = %s", (dataset_id, session_id))
+        conn.execute("INSERT INTO messages(session_id, role, content) VALUES (%s, 'user', %s)", (session_id, question))
+        conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
 
 
 def _store_assistant(session_id: str, payload: dict, audit_action: str, dataset_id: int | None) -> None:
     content = "\n".join(payload.get("insights") or [payload.get("message", "")])
     with connect() as conn:
         conn.execute(
-            "INSERT INTO messages(session_id, role, content, payload) VALUES (?, 'assistant', ?, ?)",
+            "INSERT INTO messages(session_id, role, content, payload) VALUES (%s, 'assistant', %s, %s)",
             (session_id, content, json.dumps(payload, ensure_ascii=False)),
         )
         conn.execute(
-            "INSERT INTO audit_logs(action, resource_type, resource_id, detail) VALUES (?, 'session', ?, ?)",
+            "INSERT INTO audit_logs(action, resource_type, resource_id, detail) VALUES (%s, 'session', %s, %s)",
             (audit_action, session_id, payload.get("effective_question", "")),
         )
-        conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
+        conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = %s", (session_id,))
 
 
 async def _answer_knowledge(

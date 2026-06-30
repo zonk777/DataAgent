@@ -172,7 +172,37 @@ def _received_chunks(upload_id: str) -> list[int]:
 
 
 def chunk_upload_status(upload_id: str) -> dict[str, Any]:
-    return {"upload_id": upload_id, "received_chunks": _received_chunks(upload_id)}
+    upload_dir = _upload_dir(upload_id)
+    received = _received_chunks(upload_id)
+    status: dict[str, Any] = {
+        "upload_id": upload_id,
+        "received_chunks": received,
+        "received_count": len(received),
+        "total_chunks": None,
+        "missing_chunks": [],
+        "complete": False,
+        "progress_percent": 0,
+    }
+    metadata_path = upload_dir / "metadata.json"
+    if not metadata_path.exists():
+        return status
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return status
+    total_chunks = max(0, int(metadata.get("total_chunks") or 0))
+    missing = [index for index in range(total_chunks) if index not in set(received)]
+    status.update(
+        {
+            "filename": metadata.get("filename"),
+            "total_chunks": total_chunks,
+            "total_size": int(metadata.get("total_size") or 0),
+            "missing_chunks": missing,
+            "complete": bool(total_chunks and not missing),
+            "progress_percent": round((len(received) / total_chunks) * 100, 2) if total_chunks else 0,
+        }
+    )
+    return status
 
 
 def save_upload_chunk(

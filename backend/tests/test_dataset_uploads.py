@@ -1,4 +1,5 @@
 from app.db import initialize_database
+from app.config import get_settings
 from app.services.datasets import (
     chunk_upload_status,
     complete_chunk_upload,
@@ -7,6 +8,22 @@ from app.services.datasets import (
     import_dataset_content,
     save_upload_chunk,
 )
+
+
+def test_default_upload_limit_is_100mb() -> None:
+    assert get_settings().max_upload_mb == 100
+
+
+def test_rejects_file_larger_than_configured_limit(monkeypatch) -> None:
+    monkeypatch.setenv("MAX_UPLOAD_MB", "1")
+    content = b"a" * (1024 * 1024 + 1)
+
+    try:
+        import_dataset_content("too_large.csv", content, "超限测试", "")
+    except ValueError as exc:
+        assert "1MB" in str(exc)
+    else:
+        raise AssertionError("超出上传大小限制时应抛出 ValueError")
 
 
 def test_chunked_dataset_upload_creates_dataset() -> None:
@@ -26,7 +43,13 @@ def test_chunked_dataset_upload_creates_dataset() -> None:
         )
         assert index in result["received_chunks"]
 
-    assert chunk_upload_status(upload_id)["received_chunks"] == [0, 1]
+    status = chunk_upload_status(upload_id)
+    assert status["received_chunks"] == [0, 1]
+    assert status["received_count"] == 2
+    assert status["total_chunks"] == 2
+    assert status["missing_chunks"] == []
+    assert status["complete"] is True
+    assert status["progress_percent"] == 100
     dataset = complete_chunk_upload(
         upload_id=upload_id,
         filename="sales.csv",
@@ -39,6 +62,26 @@ def test_chunked_dataset_upload_creates_dataset() -> None:
     assert dataset["name"] == "销售测试"
     assert dataset["row_count"] == 1
     assert dataset["column_count"] == 3
+
+
+def test_chunk_upload_status_reports_missing_chunks() -> None:
+    initialize_database()
+    upload_id = "testupload02"
+    result = save_upload_chunk(
+        upload_id=upload_id,
+        chunk_index=1,
+        total_chunks=3,
+        total_size=9,
+        filename="partial.csv",
+        content=b"bbb",
+    )
+
+    assert result["complete"] is False
+    status = chunk_upload_status(upload_id)
+    assert status["received_chunks"] == [1]
+    assert status["missing_chunks"] == [0, 2]
+    assert status["progress_percent"] == 33.33
+    assert status["complete"] is False
 
 
 def test_dataset_preview_returns_first_100_rows() -> None:

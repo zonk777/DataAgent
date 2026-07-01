@@ -56,6 +56,12 @@ class MySQLImportRequest(BaseModel):
     ssl_cert: str | None = Field(default=None, max_length=500)
     ssl_key: str | None = Field(default=None, max_length=500)
     ssh_enabled: bool = False
+    ssh_host: str | None = Field(default=None, max_length=255)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_username: str | None = Field(default=None, max_length=128)
+    ssh_password: str | None = Field(default=None, max_length=256)
+    ssh_pkey: str | None = Field(default=None, max_length=1000)
+    ssh_private_key_passphrase: str | None = Field(default=None, max_length=256)
 
 
 class MySQLSchemaRequest(BaseModel):
@@ -72,6 +78,12 @@ class MySQLSchemaRequest(BaseModel):
     ssl_cert: str | None = Field(default=None, max_length=500)
     ssl_key: str | None = Field(default=None, max_length=500)
     ssh_enabled: bool = False
+    ssh_host: str | None = Field(default=None, max_length=255)
+    ssh_port: int = Field(default=22, ge=1, le=65535)
+    ssh_username: str | None = Field(default=None, max_length=128)
+    ssh_password: str | None = Field(default=None, max_length=256)
+    ssh_pkey: str | None = Field(default=None, max_length=1000)
+    ssh_private_key_passphrase: str | None = Field(default=None, max_length=256)
 
 
 class LoginRequest(BaseModel):

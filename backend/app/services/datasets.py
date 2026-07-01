@@ -310,6 +310,13 @@ def _mysql_pool_key(payload: Any, database: str | None) -> tuple[Any, ...]:
         _payload_value(payload, "ssl_ca"),
         _payload_value(payload, "ssl_cert"),
         _payload_value(payload, "ssl_key"),
+        bool(_payload_value(payload, "ssh_enabled", False)),
+        _payload_value(payload, "ssh_host"),
+        int(_payload_value(payload, "ssh_port", 22)),
+        _payload_value(payload, "ssh_username"),
+        _payload_value(payload, "ssh_password"),
+        _payload_value(payload, "ssh_pkey"),
+        _payload_value(payload, "ssh_private_key_passphrase"),
     )
 
 
@@ -322,12 +329,44 @@ def _mysql_pool(key: tuple[Any, ...]) -> LifoQueue:
         return pool
 
 
+def _ssh_tunnel(payload: Any):
+    """Establish SSH tunnel for connecting to MySQL behind a bastion host."""
+    ssh_host = _payload_value(payload, "ssh_host")
+    ssh_username = _payload_value(payload, "ssh_username")
+    if not ssh_host or not ssh_username:
+        raise ValueError("启用 SSH 隧道时必须填写 SSH 主机和 SSH 用户名")
+    if not _payload_value(payload, "ssh_password") and not _payload_value(payload, "ssh_pkey"):
+        raise ValueError("启用 SSH 隧道时必须填写 SSH 密码或私钥路径")
+    try:
+        from sshtunnel import SSHTunnelForwarder
+    except ImportError as exc:
+        raise ValueError("当前环境缺少 sshtunnel 依赖，请先执行 pip install -r backend/requirements.txt") from exc
+
+    tunnel = SSHTunnelForwarder(
+        ssh_address_or_host=(ssh_host, int(_payload_value(payload, "ssh_port", 22))),
+        ssh_username=ssh_username,
+        ssh_password=_payload_value(payload, "ssh_password") or None,
+        ssh_pkey=_payload_value(payload, "ssh_pkey") or None,
+        ssh_private_key_password=_payload_value(payload, "ssh_private_key_passphrase") or None,
+        remote_bind_address=(_payload_value(payload, "host"), int(_payload_value(payload, "port", 3306))),
+        local_bind_address=("127.0.0.1", 0),
+        set_keepalive=30,
+    )
+    try:
+        tunnel.start()
+    except Exception as exc:
+        tunnel.stop()
+        raise ValueError(f"SSH 隧道建立失败：{exc}") from exc
+    return tunnel
+
+
 def _new_mysql_connection(payload: Any, database: str | None = None):
-    if _payload_value(payload, "ssh_enabled", False):
-        raise ValueError("当前版本暂未内置 SSH 隧道连接；如需跨公网访问，建议先用 Tailscale/ZeroTier 或本机 SSH 隧道映射后再连接")
+    tunnel = _ssh_tunnel(payload) if _payload_value(payload, "ssh_enabled", False) else None
+    connect_host = "127.0.0.1" if tunnel is not None else _payload_value(payload, "host")
+    connect_port = int(tunnel.local_bind_port) if tunnel is not None else int(_payload_value(payload, "port", 3306))
     kwargs = {
-        "host": _payload_value(payload, "host"),
-        "port": int(_payload_value(payload, "port", 3306)),
+        "host": connect_host,
+        "port": connect_port,
         "user": _payload_value(payload, "username"),
         "password": _payload_value(payload, "password", ""),
         "charset": "utf8mb4",
@@ -342,28 +381,52 @@ def _new_mysql_connection(payload: Any, database: str | None = None):
     ssl_config = _mysql_ssl_config(payload)
     if ssl_config is not None:
         kwargs["ssl"] = ssl_config
-    return pymysql.connect(**kwargs)
+    try:
+        conn = pymysql.connect(**kwargs)
+    except Exception:
+        if tunnel is not None:
+            tunnel.stop()
+        raise
+    return _MySQLLease(conn, tunnel)
+
+
+class _MySQLLease:
+    """Holds a MySQL connection and optional SSH tunnel together."""
+    def __init__(self, conn, tunnel=None):
+        self.conn = conn
+        self.tunnel = tunnel
+
+    def ping(self):
+        self.conn.ping(reconnect=True)
+
+    def close(self):
+        try:
+            self.conn.close()
+        finally:
+            if self.tunnel is not None:
+                self.tunnel.stop()
 
 
 @contextmanager
 def external_mysql_connection(payload: Any, database: str | None = None):
     key = _mysql_pool_key(payload, database)
     pool = _mysql_pool(key)
+    lease = None
     try:
-        conn = pool.get_nowait()
+        lease = pool.get_nowait()
     except Empty:
-        conn = _new_mysql_connection(payload, database)
+        lease = _new_mysql_connection(payload, database)
     try:
-        conn.ping(reconnect=True)
-        yield conn
+        lease.ping()
+        yield lease.conn
     except Exception:
-        conn.close()
+        lease.close()
         raise
     else:
         try:
-            pool.put_nowait(conn)
+            pool.put_nowait(lease)
         except Full:
-            conn.close()
+            lease.close()
 
 
 def test_mysql_connection(payload: Any) -> dict[str, Any]:

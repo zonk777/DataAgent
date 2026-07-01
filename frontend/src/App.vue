@@ -139,6 +139,17 @@ function analyze(q: string) {
   })
 }
 
+function newSession() {
+  sessionId.value = undefined
+  chatMessages.value = []
+  result.value = null
+  thinkingSteps.value = []
+  thinkingText.value = ''
+  thinkingCollapsed.value = false
+  loading.value = false
+  error.value = ''
+}
+
 function toggleThinking() {
   thinkingCollapsed.value = !thinkingCollapsed.value
 }
@@ -175,9 +186,19 @@ async function deleteKnowledge(item: KnowledgeItem) {
   catch (err: any) { error.value = err.message || '删除知识片段失败' }
 }
 
-async function addAdmin(f: { username: string; password: string }) {
+async function addAdmin(f: { username: string; password: string; role: string; dataset_ids: number[] }) {
   try { await api.createAdmin(f); admins.value = await api.admins() }
   catch (err: any) { error.value = err.message || '新增管理员失败' }
+}
+
+async function updateAdmin(id: number, f: { role: string; dataset_ids: number[] }) {
+  try { await api.updateAdmin(id, f); admins.value = await api.admins() }
+  catch (err: any) { error.value = err.message || '更新管理员失败' }
+}
+
+async function deleteAdmin(id: number) {
+  try { await api.deleteAdmin(id); admins.value = admins.value.filter(a => a.id !== id) }
+  catch (err: any) { error.value = err.message || '删除管理员失败' }
 }
 
 onMounted(bootstrap)
@@ -217,11 +238,11 @@ onMounted(bootstrap)
       <div v-if="error" class="error-banner">{{ error }} <button @click="loadBase">重新连接</button></div>
 
       <OverviewView v-if="activeView === 'overview'" :dashboard="dashboard" :datasets="datasets" @analyze="analyze" @inspect="inspectDataset" @nav="(v: string) => activeView = v as ViewName" />
-      <AnalystView v-else-if="activeView === 'analyst'" :sessions="sessions" :chat-messages="chatMessages" :result="result" :loading="loading" :session-id="sessionId" :examples="examples" :thinking-steps="thinkingSteps" :thinking-text="thinkingText" :thinking-collapsed="thinkingCollapsed" @analyze="analyze" @open-session="openSession" @delete-session="deleteSession" @new-session="sessionId = undefined; chatMessages = []; result = null; thinkingSteps = []; thinkingText = ''" @show-result="(m: ChatMessage) => { if (m.payload) result = m.payload }" @toggle-thinking="toggleThinking" />
+      <AnalystView v-else-if="activeView === 'analyst'" :sessions="sessions" :chat-messages="chatMessages" :result="result" :loading="loading" :session-id="sessionId" :examples="examples" :thinking-steps="thinkingSteps" :thinking-text="thinkingText" :thinking-collapsed="thinkingCollapsed" @analyze="analyze" @open-session="openSession" @delete-session="deleteSession" @new-session="newSession" @show-result="(m: ChatMessage) => { if (m.payload) result = m.payload }" @toggle-thinking="toggleThinking" />
       <DatasetsView v-else-if="activeView === 'datasets'" :datasets="datasets" :selected="selectedDataset" :selected-id="selectedDatasetId" @upload="doUpload" @inspect="inspectDataset" />
       <KnowledgeView v-else-if="activeView === 'knowledge'" :items="knowledge" @add="addKnowledge" @del="deleteKnowledge" />
       <AuditView v-else-if="activeView === 'audit'" />
-      <AccountsView v-else-if="activeView === 'accounts'" :current="currentAdmin" :admins="admins" @create="addAdmin" />
+      <AccountsView v-else-if="activeView === 'accounts'" :current="currentAdmin" :admins="admins" :datasets="datasets" @create="addAdmin" @update="updateAdmin" @delete="deleteAdmin" />
       <SettingsView v-else :config="config" />
     </main>
   </div>

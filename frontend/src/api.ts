@@ -261,6 +261,8 @@ export const api = {
     callbacks: StreamCallbacks,
   ) => {
     const controller = new AbortController()
+    let aborted = false
+    let doneCalled = false
 
     const run = async () => {
       try {
@@ -310,6 +312,7 @@ export const api = {
                     callbacks.onResult(event.data)
                     break
                   case 'done':
+                    doneCalled = true
                     callbacks.onDone()
                     break
                   case 'error':
@@ -322,15 +325,45 @@ export const api = {
             }
           }
         }
+
+        // Process any remaining data in buffer after stream ends
+        if (!doneCalled && buffer.trim()) {
+          const line = buffer.trim()
+          if (line.startsWith('data: ')) {
+            try {
+              const event = JSON.parse(line.slice(6))
+              if (event.type === 'done') {
+                doneCalled = true
+                callbacks.onDone()
+              } else if (event.type === 'error') {
+                callbacks.onError(event.message || '未知错误')
+              }
+            } catch {
+              // skip malformed final event
+            }
+          }
+        }
+
+        // Guard: ensure onDone is always called when stream ends naturally
+        if (!aborted && !doneCalled) {
+          callbacks.onDone()
+        }
       } catch (err: any) {
-        if (err.name !== 'AbortError') {
+        if (err.name === 'AbortError') {
+          aborted = true
+        } else {
           callbacks.onError(err.message || '网络连接失败')
         }
       }
     }
 
     run()
-    return { cancel: () => controller.abort() }
+    // Return a direct cancel function so streamCancel?.() works correctly
+    const cancel = () => {
+      aborted = true
+      controller.abort()
+    }
+    return cancel
   },
   upload: (file: File, name: string, description: string, onProgress?: (progress: UploadProgress) => void) =>
     file.size > CHUNK_UPLOAD_THRESHOLD

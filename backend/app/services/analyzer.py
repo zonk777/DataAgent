@@ -15,7 +15,11 @@ from .intent_classifier import IntentResult, classify_intent
 from .chart_recommender import recommend_chart
 from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, patch_insights, polish_insights, reflect_on_insights
+from .analysis_planner import plan_analysis
+from .data_profiler import profile_dataset
+from .dimension_executor import execute_plan_stream
 from .memory import compress_history, format_profile_context, llm_merge_followup, load_user_profile, update_user_profile_from_analysis
+from .meta_router import route_intent
 from .planner import build_plan_steps, plan_titles
 from .semantic_cache import lookup as cache_lookup, store as cache_store
 from .python_executor import execute_python_analysis
@@ -1025,6 +1029,82 @@ async def analyze_with_document(
     _store_user(session_id, question or f"分析文档: {doc_title}", dataset["id"])
     _store_assistant(session_id, react_result, "analyze", dataset["id"])
     return react_result
+
+
+async def analyze_to_report_stream(
+    question: str,
+    session_id: str | None,
+    dataset_id: int | None,
+    *,
+    filename: str = "",
+    file_content: bytes | None = None,
+):
+    """Phase 2: Full report pipeline — plan → execute sections → yield SSE events.
+
+    Yields SSE event dicts: plan_start, section_start, section_done, plan_done, error.
+    """
+    settings = get_settings()
+    session_id = session_id or uuid.uuid4().hex
+    history = _load_history(session_id)
+
+    # If file uploaded, parse and add context
+    effective_question = question
+    if file_content and filename:
+        from .knowledge_documents import extract_document_text
+        try:
+            doc_text = extract_document_text(filename, file_content)
+            effective_question = f"[文档内容: {filename}]\n{doc_text[:4000]}\n\n[用户问题] {question or '请全面分析这份数据'}"
+        except Exception:
+            pass
+
+    dataset = _dataset(dataset_id)
+    _store_user(session_id, question or "分析报告", dataset["id"])
+
+    # Phase 0: Intent + Persona
+    data_profile = profile_dataset(dataset["id"])
+    intent = await route_intent(effective_question, data_profile)
+
+    # Phase 1: Analysis Plan
+    plan = await plan_analysis(effective_question, data_profile, intent["matched_persona"])
+    yield {"type": "plan", "plan": plan, "persona": intent["matched_persona"], "clarification": intent.get("clarification")}
+
+    if not intent.get("info_sufficient") and intent.get("clarification"):
+        yield {"type": "need_clarification", "message": intent["clarification"].get("message", ""), "options": intent["clarification"].get("options", [])}
+        return
+
+    # Phase 2: Execute sections with SSE streaming
+    insights_collected: list[str] = []
+    all_rows: list[dict] = []
+    chart_meta = {"type": "bar", "title": plan.get("report_title", "分析报告")}
+
+    async for event in execute_plan_stream(
+        plan, dataset["table_name"], dataset["columns"], effective_question, dataset["name"],
+    ):
+        if event["type"] == "section_done":
+            insights_collected.append(event.get("narrative", ""))
+            if event.get("rows"):
+                all_rows.extend(event["rows"][:10])
+        yield event
+
+    # Build final result payload
+    payload = {
+        "session_id": session_id,
+        "message": f"分析报告生成完成，共 {len(insights_collected)} 个分析维度。",
+        "intent": intent.get("task_type", "analysis"),
+        "plan": plan.get("sections", []),
+        "sql": "",
+        "columns": list(all_rows[0].keys()) if all_rows else [],
+        "rows": all_rows[:50],
+        "chart": chart_meta,
+        "insights": insights_collected,
+        "knowledge_refs": [],
+        "execution_mode": "report-pipeline",
+        "answer_type": "data_analysis",
+        "context_applied": False,
+        "effective_question": effective_question,
+    }
+    _store_assistant(session_id, payload, "analyze", dataset["id"])
+    yield {"type": "result", "data": payload}
 
 
 async def analyze(question: str, session_id: str | None, dataset_id: int | None) -> dict:

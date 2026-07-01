@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from ..db import connect
 from ..models import AnalysisResponse, ChatRequest, SessionCreate
-from ..services.analyzer import analyze, analyze_react, analyze_stream, analyze_with_document
+from ..services.analyzer import analyze, analyze_react, analyze_stream, analyze_to_report_stream, analyze_with_document
 from ..services.analysis_planner import plan_analysis
 from ..services.audit import log_action
 from ..services.auth import current_admin
@@ -95,6 +95,41 @@ def delete_session(session_id: str, request: Request) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     log_action("delete_session", "session", session_id, "删除历史对话", actor=actor)
+
+
+@router.post("/agent/chat/report/stream")
+async def chat_report_stream(
+    request: Request,
+    question: str = Form(default=""),
+    file: UploadFile | None = File(default=None),
+    dataset_id: int | None = Form(default=None),
+    session_id: str | None = Form(default=None),
+):
+    """Phase 2: Full report pipeline with SSE streaming — plan → execute → narrative."""
+    actor = current_admin(request)
+    ds_id = dataset_id or first_accessible_dataset_id(actor)
+    if ds_id:
+        ensure_dataset_access(actor, ds_id)
+
+    file_bytes = await file.read() if file and file.filename else None
+    filename = file.filename if file and file.filename else ""
+
+    async def event_generator():
+        try:
+            async for event in analyze_to_report_stream(
+                question=question or "全面分析",
+                session_id=session_id,
+                dataset_id=ds_id,
+                filename=filename,
+                file_content=file_bytes,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            log_action("analysis_request", "session", session_id or "", f"[报告流] {question}", actor=actor)
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.post("/agent/report/plan")

@@ -62,10 +62,10 @@ def test_python_analysis_is_used_for_complex_trend_question(monkeypatch) -> None
     async def fake_classify_intent(question, history):
         return IntentResult("trend_analysis", 0.99, "test", "python route")
 
-    async def fake_generate_llm_sql(question, dataset, limit):
+    async def fake_generate_llm_sql(question, dataset, limit, business_knowledge=None, intent_reason=""):
         return None
 
-    async def fake_polish_insights(question, rows, draft, knowledge):
+    async def fake_polish_insights(question, rows, draft, knowledge, intent_reason="", plan_source=""):
         return draft
 
     async def fake_search_knowledge(question, dataset_id=None, limit=5):
@@ -109,14 +109,14 @@ def test_sql_auto_repair_recovers_from_bad_llm_sql(monkeypatch) -> None:
     async def fake_classify_intent(question, history):
         return IntentResult("data_query", 0.99, "test", "sql repair route")
 
-    async def fake_generate_llm_sql(question, dataset, limit):
+    async def fake_generate_llm_sql(question, dataset, limit, business_knowledge=None, intent_reason=""):
         return "SELECT missing_column FROM data_demo_sales LIMIT 10"
 
-    async def fake_repair_llm_sql(question, dataset, limit, failed_sql, error):
+    async def fake_repair_llm_sql(question, dataset, limit, failed_sql, error, business_knowledge=None, intent_reason=""):
         assert "missing_column" in failed_sql
         return 'SELECT region AS "区域", ROUND(SUM(sales_amount), 2) AS "销售额" FROM data_demo_sales GROUP BY region LIMIT 500'
 
-    async def fake_polish_insights(question, rows, draft, knowledge):
+    async def fake_polish_insights(question, rows, draft, knowledge, intent_reason="", plan_source=""):
         return draft
 
     async def fake_search_knowledge(question, dataset_id=None, limit=5):

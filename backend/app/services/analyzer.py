@@ -343,9 +343,15 @@ async def _execute_sql_with_repair(
     dataset: dict,
     query_plan: QueryPlan,
     limit: int,
+    business_knowledge: list[dict] | None = None,
+    intent_reason: str = "",
 ) -> tuple[str, list[dict[str, Any]], str, dict[str, Any]]:
     settings = get_settings()
-    llm_sql = await generate_llm_sql(question, dataset, limit)
+    llm_sql = await generate_llm_sql(
+        question, dataset, limit,
+        business_knowledge=business_knowledge,
+        intent_reason=intent_reason,
+    )
     plan_source = query_plan_source(question, llm_sql)
     template_sql = query_plan.sql
     candidate_sql = llm_sql or template_sql
@@ -393,7 +399,11 @@ async def _execute_sql_with_repair(
                 break
             repaired_sql = None
             if settings.llm_configured:
-                repaired_sql = await repair_llm_sql(question, dataset, limit, candidate_sql, error)
+                repaired_sql = await repair_llm_sql(
+                    question, dataset, limit, candidate_sql, error,
+                    business_knowledge=business_knowledge,
+                    intent_reason=intent_reason,
+                )
             if repaired_sql and repaired_sql != candidate_sql:
                 candidate_sql = repaired_sql
                 candidate_params = []
@@ -766,25 +776,34 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
     yield {"type": "thinking", "content": f"使用数据集「{dataset['name']}」，包含 {len(dataset['columns'])} 个字段、约 {dataset.get('row_count', '?')} 条数据"}
     yield {"type": "step", "step_id": 2, "title": plan_step_titles[1] if len(plan_step_titles) > 1 else "分析数据集", "status": "completed", "detail": dataset["name"]}
 
+    # 提前检索业务知识，供 SQL 生成和洞察润色共用（Q-001: RAG→SQL 数据流）
+    knowledge = await search_knowledge(effective_question, dataset_id)
+
     yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "running"}
     query_plan = _build_query(effective_question, dataset, settings.query_row_limit)
-    yield {"type": "thinking", "content": f"正在根据表 {dataset['table_name']} 的字段生成 SQL 查询..."}
+    knowledge_hint = f"，结合 {len(knowledge)} 条业务知识优化 SQL..." if knowledge else ""
+    yield {"type": "thinking", "content": f"正在根据表 {dataset['table_name']} 的字段生成 SQL 查询{knowledge_hint}"}
     safe_sql, rows, plan_source, sql_repair = await _execute_sql_with_repair(
         effective_question,
         dataset,
         query_plan,
         settings.query_row_limit,
+        business_knowledge=knowledge,        # Q-001: RAG 注入 SQL 生成
+        intent_reason=intent_result.reason,  # Q-004: 意图推理上下文注入 SQL 生成
     )
     yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "completed", "detail": f"返回 {len(rows)} 条结果"}
 
     yield {"type": "step", "step_id": 4, "title": plan_step_titles[3] if len(plan_step_titles) > 3 else "生成洞察", "status": "running"}
-    knowledge = await search_knowledge(effective_question, dataset_id)
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
     yield {"type": "thinking", "content": f"查询返回 {len(rows)} 条结果" + (f"，结合 {len(knowledge)} 条业务知识提炼洞察..." if knowledge else "...")}
     if intent_result.label == "anomaly_attribution":
         insights = await _anomaly_attribution_insights(effective_question, dataset, query_plan, rows)
     else:
-        insights = await polish_insights(effective_question, rows, draft, knowledge)
+        insights = await polish_insights(
+            effective_question, rows, draft, knowledge,
+            intent_reason=intent_result.reason,   # Q-004: 意图推理上下文注入洞察润色
+            plan_source=plan_source,               # Q-004: SQL 生成来源注入洞察润色
+        )
     chart_recommendation = recommend_chart(
         effective_question,
         intent_result.label,

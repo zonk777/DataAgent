@@ -63,11 +63,28 @@ async def answer_from_knowledge(
     return "\n".join(f"{item['title']}：{item['content']}" for item in knowledge[:3])
 
 
-async def polish_insights(question: str, rows: list[dict], draft: list[str], knowledge: list[dict]) -> list[str]:
-    """Use an OpenAI-compatible endpoint when configured; otherwise keep deterministic output."""
+async def polish_insights(
+    question: str,
+    rows: list[dict],
+    draft: list[str],
+    knowledge: list[dict],
+    intent_reason: str = "",
+    plan_source: str = "",
+) -> list[str]:
+    """Use an OpenAI-compatible endpoint when configured; otherwise keep deterministic output.
+
+    当 intent_reason 非空时，注入意图分类的推理上下文，避免 LLM 冷启动。
+    当 plan_source 非空时，注入 SQL 生成来源（模板/LLM/修复），帮助理解数据口径。
+    """
     settings = get_settings()
     if not settings.llm_configured:
         return draft
+
+    system_extra = ""
+    if intent_reason:
+        system_extra += f" 本次分析意图: {intent_reason}。"
+    if plan_source:
+        system_extra += f" SQL 由 {plan_source} 生成，请据此判断数据口径可信度。"
 
     payload = {
         "model": settings.llm_model,
@@ -75,7 +92,10 @@ async def polish_insights(question: str, rows: list[dict], draft: list[str], kno
         "messages": [
             {
                 "role": "system",
-                "content": "你是企业数据分析师。只依据给定聚合数据总结，输出 JSON 字符串数组，最多4条，不虚构原因。",
+                "content": (
+                    "你是企业数据分析师。只依据给定聚合数据总结，输出 JSON 字符串数组，最多4条，不虚构原因。"
+                    + system_extra
+                ),
             },
             {
                 "role": "user",

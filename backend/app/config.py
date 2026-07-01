@@ -41,6 +41,7 @@ class Settings(BaseSettings):
     milvus_token: str = ""
     milvus_database: str = ""
     semantic_search_timeout_seconds: float = Field(default=1.0, ge=0.1, le=30.0)
+    mcp_servers: str = ""
 
     max_upload_mb: int = Field(default=100, ge=1, le=200)
     query_row_limit: int = Field(default=500, ge=10, le=5000)

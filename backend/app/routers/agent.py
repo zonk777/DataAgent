@@ -188,7 +188,7 @@ async def chat_react_stream(payload: ChatRequest, request: Request):
 
             # Emit final result
             yield f"data: {json.dumps({'type': 'result', 'data': result}, ensure_ascii=False)}\n\n"
-            yield "data: [DONE]\n\n"
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
 
             log_action("analysis_request", "session", result.get("session_id"), f"[ReAct+Stream] {payload.question}", actor=actor)
         except Exception as exc:

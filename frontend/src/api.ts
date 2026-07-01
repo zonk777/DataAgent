@@ -25,6 +25,12 @@ export type MySQLConnectionPayload = {
   ssl_cert?: string
   ssl_key?: string
   ssh_enabled?: boolean
+  ssh_host?: string
+  ssh_port?: number
+  ssh_username?: string
+  ssh_password?: string
+  ssh_pkey?: string
+  ssh_private_key_passphrase?: string
 }
 
 export type MySQLSchema = {
@@ -226,6 +232,12 @@ export const api = {
     ssl_cert?: string
     ssl_key?: string
     ssh_enabled?: boolean
+    ssh_host?: string
+    ssh_port?: number
+    ssh_username?: string
+    ssh_password?: string
+    ssh_pkey?: string
+    ssh_private_key_passphrase?: string
   }) =>
     request<Dataset>('/datasets/mysql/import', {
       method: 'POST',

@@ -15,23 +15,20 @@ const logs = ref<AuditLog[]>([])
 const loading = ref(false)
 const error = ref('')
 
+function buildQuery(): string {
+  const params: string[] = []
+  if (username.value) params.push(`username=${encodeURIComponent(username.value)}`)
+  if (action.value) params.push(`action=${encodeURIComponent(action.value)}`)
+  if (dateFrom.value) params.push(`date_from=${encodeURIComponent(dateFrom.value)}`)
+  if (dateTo.value) params.push(`date_to=${encodeURIComponent(dateTo.value)}`)
+  return params.length ? `?${params.join('&')}` : ''
+}
+
 async function handleSearch() {
   loading.value = true
   error.value = ''
-
-  const params: Record<string, string> = {}
-  if (username.value) params.username = username.value
-  if (action.value) params.action = action.value
-  if (dateFrom.value) params.date_from = dateFrom.value
-  if (dateTo.value) params.date_to = dateTo.value
-
   try {
-    const resp = await fetch(
-      `/api/v1/audit/logs?${new URLSearchParams(params).toString()}`,
-      { credentials: 'include' },
-    )
-    if (!resp.ok) throw new Error((await resp.json()).detail || '查询失败')
-    logs.value = await resp.json()
+    logs.value = await api.auditLogs(buildQuery())
   } catch (err: any) {
     error.value = err.message || '查询审计日志失败'
   } finally {
@@ -40,12 +37,7 @@ async function handleSearch() {
 }
 
 function handleExport() {
-  const params: Record<string, string> = {}
-  if (username.value) params.username = username.value
-  if (action.value) params.action = action.value
-  if (dateFrom.value) params.date_from = dateFrom.value
-  if (dateTo.value) params.date_to = dateTo.value
-  window.open(`/api/v1/audit/logs/export.xlsx?${new URLSearchParams(params).toString()}`, '_blank')
+  window.open(api.auditExportUrl(buildQuery()), '_blank')
 }
 </script>
 

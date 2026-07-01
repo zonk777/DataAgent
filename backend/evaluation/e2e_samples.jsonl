@@ -1,0 +1,15 @@
+{"id":1,"question":"统计各区域销售额","expected_intent":"data_query","expected_topics":["区域","销售额"],"difficulty":"easy"}
+{"id":2,"question":"分析近30天各地区销售额趋势","expected_intent":"trend_analysis","expected_topics":["趋势","区域","销售额","近30天"],"difficulty":"easy"}
+{"id":3,"question":"为什么华东地区销售额下降了","expected_intent":"anomaly_attribution","expected_topics":["原因","华东","销售额","下降"],"difficulty":"medium"}
+{"id":4,"question":"销售额的计算口径是什么","expected_intent":"knowledge_qa","expected_topics":["口径","销售额","计算"],"difficulty":"easy"}
+{"id":5,"question":"查询投诉率最高的产品类别","expected_intent":"data_query","expected_topics":["投诉率","产品","排名"],"difficulty":"easy"}
+{"id":6,"question":"按月查看利润变化","expected_intent":"trend_analysis","expected_topics":["利润","月度","趋势"],"difficulty":"easy"}
+{"id":7,"question":"帮我生成这个月的分析报告","expected_intent":"report_generation","expected_topics":["报告","月"],"difficulty":"easy"}
+{"id":8,"question":"只看华东地区","expected_intent":"data_query","expected_topics":["华东","过滤"],"difficulty":"easy","is_followup":true}
+{"id":9,"question":"改成柱状图","expected_intent":"data_query","expected_topics":["图表","柱状图"],"difficulty":"easy","is_followup":true}
+{"id":10,"question":"分析各渠道转化率对比","expected_intent":"data_query","expected_topics":["渠道","转化率","对比"],"difficulty":"medium"}
+{"id":11,"question":"上个月哪个区域的利润最高","expected_intent":"data_query","expected_topics":["利润","区域","排名","上月"],"difficulty":"medium"}
+{"id":12,"question":"智能设备的销售占比是否在上升","expected_intent":"trend_analysis","expected_topics":["产品","占比","趋势"],"difficulty":"medium"}
+{"id":13,"question":"最近一周投诉率突然升高的原因","expected_intent":"anomaly_attribution","expected_topics":["投诉率","异常","归因","最近"],"difficulty":"hard"}
+{"id":14,"question":"对比华东和华南的利润差距","expected_intent":"data_query","expected_topics":["区域","利润","对比","华东","华南"],"difficulty":"medium"}
+{"id":15,"question":"近三个月各渠道销售额分布情况","expected_intent":"data_query","expected_topics":["渠道","销售额","分布","近三个月"],"difficulty":"medium"}

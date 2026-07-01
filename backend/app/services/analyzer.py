@@ -15,6 +15,7 @@ from .intent_classifier import IntentResult, classify_intent
 from .chart_recommender import recommend_chart
 from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, patch_insights, polish_insights, reflect_on_insights
+from .memory import compress_history, format_profile_context, llm_merge_followup, load_user_profile, update_user_profile_from_analysis
 from .planner import build_plan_steps, plan_titles
 from .python_executor import execute_python_analysis
 from .react_agent import run_react_loop
@@ -700,6 +701,18 @@ def _merge_followup(question: str, history: list[dict[str, Any]]) -> tuple[str, 
     return f"{merged_base}；{current}" if merged_base else current, True
 
 
+def _actor_id_from_history(history: list[dict]) -> int | None:
+    """Extract user/actor ID from session history if available."""
+    with connect() as conn:
+        for item in reversed(history):
+            payload = item.get("payload")
+            if isinstance(payload, dict) and payload.get("session_id"):
+                row = conn.execute("SELECT user_id FROM sessions WHERE id = ?", (payload["session_id"],)).fetchone()
+                if row and row.get("user_id"):
+                    return row["user_id"]
+    return None
+
+
 def _store_user(session_id: str, question: str, dataset_id: int | None) -> None:
     with connect() as conn:
         session = conn.execute("SELECT id FROM sessions WHERE id = ?", (session_id,)).fetchone()
@@ -884,14 +897,35 @@ async def _anomaly_attribution_insights(
 
 
 async def analyze_react(question: str, session_id: str | None, dataset_id: int | None, *, use_mcp: bool = False) -> dict:
-    """ReAct Agent path — LLM-driven tool calling loop. Optionally uses MCP for dynamic tool discovery."""
+    """ReAct Agent path — LLM-driven tool calling loop with memory integration."""
     settings = get_settings()
     session_id = session_id or uuid.uuid4().hex
     history = _load_history(session_id)
+
+    # M-003: LLM-based follow-up merging
+    merged_question, is_followup = await llm_merge_followup(question, history)
+    effective_question = merged_question
+
+    # M-001: compress old history
+    compressed = await compress_history(history) if len(history) > 3 else ""
+
     dataset = _dataset(dataset_id)
 
+    # Inject compressed context into question for ReAct agent
+    react_question = effective_question
+    if compressed:
+        react_question = f"[对话背景]\n{compressed}\n\n[当前问题] {effective_question}"
+
+    # M-002: load user profile
+    actor_id = _actor_id_from_history(history)
+    user_profile = await load_user_profile(actor_id) if actor_id else {}
+    if user_profile:
+        profile_ctx = format_profile_context(user_profile)
+        if profile_ctx:
+            react_question = f"{profile_ctx}\n{react_question}"
+
     react_result = await run_react_loop(
-        question=question,
+        question=react_question,
         dataset_id=dataset["id"],
         table_name=dataset["table_name"],
         columns=dataset["columns"],
@@ -899,8 +933,19 @@ async def analyze_react(question: str, session_id: str | None, dataset_id: int |
         use_mcp=use_mcp,
     )
     react_result["session_id"] = session_id
+    react_result["context_applied"] = is_followup or bool(compressed)
+    react_result["effective_question"] = effective_question
     _store_user(session_id, question, dataset["id"])
     _store_assistant(session_id, react_result, "analyze", dataset["id"])
+
+    # M-002: update user profile after analysis
+    if actor_id:
+        await update_user_profile_from_analysis(
+            actor_id, question,
+            react_result.get("insights", []),
+            dataset["name"],
+        )
+
     return react_result
 
 
@@ -920,7 +965,7 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
     settings = get_settings()
     session_id = session_id or uuid.uuid4().hex
     history = _load_history(session_id)
-    effective_question, context_applied = _merge_followup(question, history)
+    effective_question, context_applied = await llm_merge_followup(question, history)
 
     # Step 1: Intent classification
     intent_result = await classify_intent(effective_question, history)

@@ -17,6 +17,7 @@ from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, polish_insights
 from .planner import build_plan_steps, plan_titles
 from .python_executor import execute_python_analysis
+from .react_agent import run_react_loop
 from .security import validate_readonly_sql
 from .sql_generator import generate_llm_sql, query_plan_source, repair_llm_sql
 
@@ -679,6 +680,27 @@ async def _anomaly_attribution_insights(
         insights.append(f"→ 建议重点关注{largest['dimension']}「{largest['value']}」的异常变化，排查业务根因。")
 
     return insights
+
+
+async def analyze_react(question: str, session_id: str | None, dataset_id: int | None, *, use_mcp: bool = False) -> dict:
+    """ReAct Agent path — LLM-driven tool calling loop. Optionally uses MCP for dynamic tool discovery."""
+    settings = get_settings()
+    session_id = session_id or uuid.uuid4().hex
+    history = _load_history(session_id)
+    dataset = _dataset(dataset_id)
+
+    react_result = await run_react_loop(
+        question=question,
+        dataset_id=dataset["id"],
+        table_name=dataset["table_name"],
+        columns=dataset["columns"],
+        history=history,
+        use_mcp=use_mcp,
+    )
+    react_result["session_id"] = session_id
+    _store_user(session_id, question, dataset["id"])
+    _store_assistant(session_id, react_result, "analyze", dataset["id"])
+    return react_result
 
 
 async def analyze(question: str, session_id: str | None, dataset_id: int | None) -> dict:

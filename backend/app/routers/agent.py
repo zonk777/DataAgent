@@ -7,7 +7,7 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from ..db import connect
 from ..models import AnalysisResponse, ChatRequest, SessionCreate
-from ..services.analyzer import analyze, analyze_stream
+from ..services.analyzer import analyze, analyze_react, analyze_stream
 from ..services.audit import log_action
 from ..services.auth import current_admin
 from ..services.permissions import ensure_dataset_access, first_accessible_dataset_id
@@ -111,6 +111,7 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
 
 @router.post("/agent/chat/stream")
 async def chat_stream(payload: ChatRequest, request: Request):
+    """SSE streaming analysis with plan steps and incremental thinking."""
     actor = current_admin(request)
     dataset_id = payload.dataset_id or first_accessible_dataset_id(actor)
     if dataset_id:
@@ -126,6 +127,38 @@ async def chat_stream(payload: ChatRequest, request: Request):
             yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/agent/chat/react", response_model=AnalysisResponse)
+async def chat_react(payload: ChatRequest, request: Request) -> dict:
+    """ReAct Agent — LLM-driven tool calling loop with hardcoded tool schemas."""
+    actor = current_admin(request)
+    dataset_id = payload.dataset_id or first_accessible_dataset_id(actor)
+    if dataset_id:
+        ensure_dataset_access(actor, dataset_id)
+    try:
+        result = await analyze_react(payload.question, payload.session_id, dataset_id)
+        log_action("analysis_request", "session", result.get("session_id"), f"[ReAct] {payload.question}", actor=actor)
+        return result
+    except Exception as exc:
+        log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/agent/chat/react/mcp", response_model=AnalysisResponse)
+async def chat_react_mcp(payload: ChatRequest, request: Request) -> dict:
+    """ReAct + MCP — dynamic tool discovery via MCP protocol."""
+    actor = current_admin(request)
+    dataset_id = payload.dataset_id or first_accessible_dataset_id(actor)
+    if dataset_id:
+        ensure_dataset_access(actor, dataset_id)
+    try:
+        result = await analyze_react(payload.question, payload.session_id, dataset_id, use_mcp=True)
+        log_action("analysis_request", "session", result.get("session_id"), f"[ReAct+MCP] {payload.question}", actor=actor)
+        return result
+    except Exception as exc:
+        log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _report_or_404(session_id: str):

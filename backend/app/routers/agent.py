@@ -18,6 +18,7 @@ from ..services.reports import (
     build_docx_report,
     build_html_report,
     build_markdown_report,
+    build_multi_section_pdf,
     build_pdf_report,
     load_report_data,
 )
@@ -291,6 +292,23 @@ async def chat_react_stream(payload: ChatRequest, request: Request):
             log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/agent/report/pdf")
+async def download_multi_section_pdf(request: Request) -> Response:
+    """Phase 3: Generate multi-section PDF from report sections data."""
+    body = await request.json()
+    actor = current_admin(request)
+
+    pdf_bytes = build_multi_section_pdf(
+        report_title=body.get("title", "数据分析报告"),
+        sections=body.get("sections", []),
+        executive_summary=body.get("executive_summary", ""),
+        data_source=body.get("data_source", ""),
+        sql_list=body.get("sql_list"),
+    )
+    log_action("export_report", "report", None, "Multi-section PDF", actor=actor)
+    return Response(pdf_bytes, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename*=UTF-8''%E6%95%B0%E6%8D%AE%E6%99%BA%E8%83%BD%E4%BD%93%E5%88%86%E6%9E%90%E6%8A%A5%E5%91%8A.pdf"})
 
 
 def _report_or_404(session_id: str):

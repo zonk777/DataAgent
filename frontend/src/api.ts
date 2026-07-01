@@ -419,5 +419,19 @@ export const api = {
   },
   auditLogs: (query = '') => request<AuditLog[]>(`/audit/logs${query}`),
   auditExportUrl: (query = '') => `${API_BASE}/audit/logs/export.xlsx${query}`,
+  downloadReportPdf: async (payload: { title: string; sections: any[]; executive_summary?: string; data_source?: string; sql_list?: string[] }) => {
+    const resp = await fetch(`${API_BASE}/agent/report/pdf`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      credentials: 'include',
+    })
+    if (!resp.ok) throw new Error('PDF 生成失败')
+    const blob = await resp.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url; a.download = '数据分析报告.pdf'; a.click()
+    URL.revokeObjectURL(url)
+  },
   reportUrl: (sessionId: string, format: 'html' | 'docx' | 'pdf' | 'md' = 'html') => `${API_BASE}/reports/${sessionId}.${format}`,
 }

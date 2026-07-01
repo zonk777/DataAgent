@@ -513,3 +513,84 @@ def build_pdf_report(data: ReportData) -> bytes:
             except OSError:
                 pass
     return out.getvalue()
+
+
+def build_multi_section_pdf(
+    report_title: str,
+    sections: list[dict],
+    executive_summary: str = "",
+    data_source: str = "",
+    sql_list: list[str] | None = None,
+) -> bytes:
+    """Phase 3: Multi-section report PDF with inline charts per section."""
+    out = BytesIO()
+    doc = SimpleDocTemplate(out, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=18 * mm, bottomMargin=18 * mm)
+    styles = _pdf_styles()
+    story: list[Any] = []
+
+    # Cover
+    story.append(Spacer(1, 40 * mm))
+    story.append(Paragraph("数据智能体分析报告", styles["title"]))
+    story.append(Spacer(1, 8 * mm))
+    story.append(Paragraph(report_title[:120], styles["subtitle"]))
+    story.append(Spacer(1, 12 * mm))
+    if data_source:
+        story.append(Paragraph(f"数据来源: {data_source}", styles["body"]))
+    from datetime import datetime
+    story.append(Paragraph(f"生成时间: {datetime.now().strftime('%Y-%m-%d %H:%M')}", styles["body"]))
+    story.append(PageBreak())
+
+    # Executive Summary
+    if executive_summary:
+        story.append(Paragraph("执行摘要", styles["h1"]))
+        for line in executive_summary.split("\n"):
+            line = line.strip()
+            if line:
+                story.append(Paragraph(line, styles["body"]))
+        story.append(PageBreak())
+
+    # Sections with inline charts
+    nums = "一二三四五六七八九十"
+    for idx, section in enumerate(sections, 1):
+        title = section.get("title", f"分析维度 {idx}")
+        narrative = section.get("narrative", "")
+        rows = section.get("rows", [])
+        chart_bytes = section.get("chart_image")
+
+        cn = nums[idx - 1] if 1 <= idx <= 10 else str(idx)
+        story.append(Paragraph(f"{cn}、{title}", styles["h1"]))
+
+        if chart_bytes:
+            try:
+                tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+                data = chart_bytes if isinstance(chart_bytes, bytes) else (chart_bytes.getvalue() if hasattr(chart_bytes, 'getvalue') else b'')
+                tmp.write(data)
+                tmp.close()
+                story.append(PdfImage(tmp.name, width=160 * mm, height=75 * mm))
+                story.append(Spacer(1, 4 * mm))
+                os.remove(tmp.name)
+            except Exception:
+                pass
+
+        for line in narrative.split("\n"):
+            line = line.strip()
+            if line:
+                story.append(Paragraph(line, styles["body"]))
+        story.append(Spacer(1, 4 * mm))
+
+        if rows and len(rows) <= 20:
+            cols = list(rows[0].keys())[:6]
+            story.append(_pdf_table(cols, [[str(r.get(c, "") or "")[:40] for c in cols] for r in rows[:15]], styles, max_rows=15))
+        elif rows:
+            story.append(Paragraph(f"（共 {len(rows)} 条记录）", styles["small"]))
+        story.append(PageBreak())
+
+    # Appendix
+    if sql_list:
+        story.append(Paragraph("附录: 分析 SQL", styles["h1"]))
+        for i, sql in enumerate(sql_list[:10], 1):
+            story.append(Paragraph(f"{i}. {sql[:200]}", styles["small"]))
+            story.append(Spacer(1, 2 * mm))
+
+    doc.build(story)
+    return out.getvalue()

@@ -21,7 +21,7 @@ from .semantic_cache import lookup as cache_lookup, store as cache_store
 from .python_executor import execute_python_analysis
 from .react_agent import run_react_loop
 from .security import validate_readonly_sql
-from .sql_generator import generate_llm_sql, query_plan_source, repair_llm_sql
+from .sql_generator import FieldNotFoundError, generate_llm_sql, query_plan_source, repair_llm_sql
 
 
 REGIONS = ["华东", "华南", "华北", "西南"]
@@ -1063,14 +1063,19 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
     query_plan = _build_query(effective_question, dataset, settings.query_row_limit)
     knowledge_hint = f"，结合 {len(knowledge)} 条业务知识优化 SQL..." if knowledge else ""
     yield {"type": "thinking", "content": f"正在根据表 {dataset['table_name']} 的字段生成 SQL 查询{knowledge_hint}"}
-    safe_sql, rows, plan_source, sql_repair = await _execute_sql_with_repair(
-        effective_question,
-        dataset,
-        query_plan,
-        settings.query_row_limit,
-        business_knowledge=knowledge,        # Q-001: RAG 注入 SQL 生成
-        intent_reason=intent_result.reason,  # Q-004: 意图推理上下文注入 SQL 生成
-    )
+    try:
+        safe_sql, rows, plan_source, sql_repair = await _execute_sql_with_repair(
+            effective_question,
+            dataset,
+            query_plan,
+            settings.query_row_limit,
+            business_knowledge=knowledge,        # Q-001: RAG 注入 SQL 生成
+            intent_reason=intent_result.reason,  # Q-004: 意图推理上下文注入 SQL 生成
+        )
+    except FieldNotFoundError as e:
+        yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "failed", "detail": e.message}
+        yield {"type": "done", "error": e.message}
+        return
     yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "completed", "detail": f"返回 {len(rows)} 条结果"}
 
     yield {"type": "step", "step_id": 4, "title": plan_step_titles[3] if len(plan_step_titles) > 3 else "生成洞察", "status": "running"}

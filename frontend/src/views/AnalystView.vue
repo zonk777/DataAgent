@@ -21,6 +21,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   analyze: [q: string]
+  analyzeFile: [file: File, q: string]
   openSession: [id: string]
   deleteSession: [id: string]
   newSession: []
@@ -31,6 +32,16 @@ const emit = defineEmits<{
 
 const question = ref('')
 const showSql = ref(false)
+const fileInput = ref<HTMLInputElement | null>(null)
+const chosenFile = ref<File | null>(null)
+
+function chooseFile(e: Event) {
+  chosenFile.value = (e.target as HTMLInputElement).files?.[0] || null
+}
+function removeFile() {
+  chosenFile.value = null
+  if (fileInput.value) fileInput.value.value = ''
+}
 
 function isLatestMessage(index: number) {
   return index === props.chatMessages.length - 1
@@ -72,7 +83,19 @@ function isLatestMessage(index: number) {
         />
         <div v-if="result?.context_applied" class="context-note"><AppIcon name="check" :size="15"/>已继承上一轮的分析条件</div>
         <div class="followups"><small>快捷提问</small><div><button v-for="item in examples" :key="item" @click="emit('analyze', item)">{{ item }}</button></div></div>
-        <div class="chat-box"><textarea v-model="question" rows="2" placeholder="可追问：只看华东；按产品拆分；或询问投诉率如何计算" @keydown.enter.exact.prevent="emit('analyze', question)"/><button :disabled="loading" @click="emit('analyze', question)"><AppIcon name="send" :size="18" /></button></div>
+        <div class="chat-box">
+          <div v-if="chosenFile" class="file-chip">
+            <AppIcon name="file" :size="14" />
+            <span>{{ chosenFile.name }}</span>
+            <button class="file-chip-remove" @click="removeFile" title="移除文件">&times;</button>
+          </div>
+          <textarea v-model="question" rows="2" placeholder="输入问题，或上传 PDF/Word/MD 文档进行分析..." @keydown.enter.exact.prevent="chosenFile ? emit('analyzeFile', chosenFile, question || '') : emit('analyze', question)"/>
+          <div class="chat-actions">
+            <input ref="fileInput" type="file" accept=".pdf,.docx,.doc,.md,.txt" @change="chooseFile" hidden />
+            <button class="icon-btn" title="上传文档分析" :disabled="loading" @click="fileInput?.click()"><AppIcon name="upload" :size="17" /></button>
+            <button :disabled="loading || (!question && !chosenFile)" @click="chosenFile ? emit('analyzeFile', chosenFile, question || '') : emit('analyze', question)"><AppIcon name="send" :size="18" /></button>
+          </div>
+        </div>
       </div>
       <div class="result-panel">
         <div v-if="!result" class="empty-result"><div><AppIcon name="chart" :size="34" /></div><h3>分析结果将在这里呈现</h3><p>选择一个示例问题，或在左侧输入你的业务问题。</p></div>

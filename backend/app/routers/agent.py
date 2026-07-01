@@ -2,12 +2,12 @@ import json
 import uuid
 from urllib.parse import quote
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import HTMLResponse, Response, StreamingResponse
 
 from ..db import connect
 from ..models import AnalysisResponse, ChatRequest, SessionCreate
-from ..services.analyzer import analyze, analyze_react, analyze_stream
+from ..services.analyzer import analyze, analyze_react, analyze_stream, analyze_with_document
 from ..services.audit import log_action
 from ..services.auth import current_admin
 from ..services.permissions import ensure_dataset_access, first_accessible_dataset_id
@@ -92,6 +92,38 @@ def delete_session(session_id: str, request: Request) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     log_action("delete_session", "session", session_id, "删除历史对话", actor=actor)
+
+
+@router.post("/agent/chat/with-file", response_model=AnalysisResponse)
+async def chat_with_file(
+    request: Request,
+    file: UploadFile = File(...),
+    question: str = Form(default=""),
+    session_id: str | None = Form(default=None),
+    dataset_id: int | None = Form(default=None),
+) -> dict:
+    """Upload a document (PDF/Word/MD/TXT) and analyze it in one step."""
+    actor = current_admin(request)
+    dataset_id = dataset_id or first_accessible_dataset_id(actor)
+    if dataset_id:
+        ensure_dataset_access(actor, dataset_id)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请选择要分析的文件")
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    try:
+        result = await analyze_with_document(
+            question=question or f"分析这份文档: {file.filename}",
+            session_id=session_id,
+            dataset_id=dataset_id,
+            filename=file.filename,
+            file_content=content,
+        )
+        log_action("analysis_request", "session", result.get("session_id"), f"[文件分析] {file.filename}", actor=actor)
+        return result
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/agent/chat", response_model=AnalysisResponse)

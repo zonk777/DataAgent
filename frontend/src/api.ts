@@ -403,6 +403,14 @@ export const api = {
   },
   deleteKnowledge: (id: number) => request<void>(`/knowledge/${id}`, { method: 'DELETE' }),
   reindexKnowledge: () => request<Record<string, unknown>>('/knowledge/reindex', { method: 'POST' }),
+  analyzeFile: (file: File, question: string, datasetId?: number, sessionId?: string) => {
+    const form = new FormData()
+    form.append('file', file)
+    if (question) form.append('question', question)
+    if (datasetId) form.append('dataset_id', String(datasetId))
+    if (sessionId) form.append('session_id', sessionId)
+    return request<AnalysisResult>('/agent/chat/with-file', { method: 'POST', body: form })
+  },
   auditLogs: (query = '') => request<AuditLog[]>(`/audit/logs${query}`),
   auditExportUrl: (query = '') => `${API_BASE}/audit/logs/export.xlsx${query}`,
   reportUrl: (sessionId: string, format: 'html' | 'docx' | 'pdf' | 'md' = 'html') => `${API_BASE}/reports/${sessionId}.${format}`,

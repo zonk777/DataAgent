@@ -150,6 +150,33 @@ function newSession() {
   error.value = ''
 }
 
+async function analyzeFile(file: File, q: string) {
+  loading.value = true; error.value = ''; activeView.value = 'analyst'
+  thinkingSteps.value = []; thinkingText.value = ''; thinkingCollapsed.value = false
+  streamCancel.value?.()
+
+  const displayQ = q || `分析文档: ${file.name}`
+  chatMessages.value.push({ role: 'user', content: `${displayQ}\n[已上传: ${file.name}]` })
+  const assistantMsg: ChatMessage = { role: 'assistant', content: '', payload: null }
+  chatMessages.value.push(assistantMsg)
+
+  try {
+    const data = await api.analyzeFile(file, q, selectedDatasetId.value, sessionId.value)
+    result.value = data
+    sessionId.value = data.session_id
+    assistantMsg.content = data.insights.join('\n')
+    assistantMsg.payload = data
+    assistantMsg._streamed = true
+    sessions.value = await api.sessions()
+    dashboard.value = await api.dashboard()
+  } catch (err: any) {
+    chatMessages.value.pop()
+    error.value = err.message || '文档分析失败'
+  } finally {
+    loading.value = false
+  }
+}
+
 function toggleThinking() {
   thinkingCollapsed.value = !thinkingCollapsed.value
 }
@@ -238,7 +265,7 @@ onMounted(bootstrap)
       <div v-if="error" class="error-banner">{{ error }} <button @click="loadBase">重新连接</button></div>
 
       <OverviewView v-if="activeView === 'overview'" :dashboard="dashboard" :datasets="datasets" @analyze="analyze" @inspect="inspectDataset" @nav="(v: string) => activeView = v as ViewName" />
-      <AnalystView v-else-if="activeView === 'analyst'" :sessions="sessions" :chat-messages="chatMessages" :result="result" :loading="loading" :session-id="sessionId" :examples="examples" :thinking-steps="thinkingSteps" :thinking-text="thinkingText" :thinking-collapsed="thinkingCollapsed" @analyze="analyze" @open-session="openSession" @delete-session="deleteSession" @new-session="newSession" @show-result="(m: ChatMessage) => { if (m.payload) result = m.payload }" @toggle-thinking="toggleThinking" />
+      <AnalystView v-else-if="activeView === 'analyst'" :sessions="sessions" :chat-messages="chatMessages" :result="result" :loading="loading" :session-id="sessionId" :examples="examples" :thinking-steps="thinkingSteps" :thinking-text="thinkingText" :thinking-collapsed="thinkingCollapsed" @analyze="analyze" @analyze-file="analyzeFile" @open-session="openSession" @delete-session="deleteSession" @new-session="newSession" @show-result="(m: ChatMessage) => { if (m.payload) result = m.payload }" @toggle-thinking="toggleThinking" />
       <DatasetsView v-else-if="activeView === 'datasets'" :datasets="datasets" :selected="selectedDataset" :selected-id="selectedDatasetId" @upload="doUpload" @inspect="inspectDataset" />
       <KnowledgeView v-else-if="activeView === 'knowledge'" :items="knowledge" @add="addKnowledge" @del="deleteKnowledge" />
       <AuditView v-else-if="activeView === 'audit'" />

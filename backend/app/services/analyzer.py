@@ -961,6 +961,72 @@ async def analyze_react(question: str, session_id: str | None, dataset_id: int |
     return react_result
 
 
+async def analyze_with_document(
+    question: str,
+    session_id: str | None,
+    dataset_id: int | None,
+    *,
+    filename: str,
+    file_content: bytes,
+) -> dict:
+    """Chat-based document analysis — parse PDF/Word/MD/TXT and analyze with context.
+
+    Flow: parse document → inject content as knowledge → analyze with full pipeline.
+    """
+    from .knowledge_documents import extract_document_text
+
+    settings = get_settings()
+    session_id = session_id or uuid.uuid4().hex
+    history = _load_history(session_id)
+    dataset = _dataset(dataset_id)
+
+    # Parse the document
+    try:
+        doc_text = extract_document_text(filename, file_content)
+    except ValueError as exc:
+        raise ValueError(f"文档解析失败：{exc}") from exc
+
+    # Truncate to reasonable context size
+    doc_text = doc_text[:8000]
+    doc_title = filename.rsplit(".", 1)[0] if "." in filename else filename
+
+    # Build document-augmented question
+    augmented_question = (
+        f"[上传文档] {doc_title}\n"
+        f"[文档内容摘要]\n{doc_text[:4000]}\n\n"
+        f"[用户问题] {question or '请分析这份文档的关键信息，总结要点。'}"
+    )
+
+    # Store document knowledge temporarily for RAG
+    with connect() as conn:
+        cursor = conn.execute(
+            "INSERT INTO knowledge_chunks(title, content, category, dataset_id) VALUES (?, ?, ?, ?)",
+            (f"临时文档: {doc_title}", doc_text[:2000], "business_rule", dataset["id"]),
+        )
+        temp_knowledge_id = cursor.lastrowid
+
+    try:
+        # Run analysis with document context
+        react_result = await run_react_loop(
+            question=augmented_question,
+            dataset_id=dataset["id"],
+            table_name=dataset["table_name"],
+            columns=dataset["columns"],
+            history=history,
+        )
+    finally:
+        # Clean up temporary knowledge
+        if temp_knowledge_id:
+            with connect() as conn:
+                conn.execute("DELETE FROM knowledge_chunks WHERE id = ?", (temp_knowledge_id,))
+
+    react_result["session_id"] = session_id
+    react_result["document_analyzed"] = doc_title
+    _store_user(session_id, question or f"分析文档: {doc_title}", dataset["id"])
+    _store_assistant(session_id, react_result, "analyze", dataset["id"])
+    return react_result
+
+
 async def analyze(question: str, session_id: str | None, dataset_id: int | None) -> dict:
     """Non-streaming analysis: runs the full pipeline and returns the result dict."""
     result = None

@@ -34,6 +34,7 @@ class Settings(BaseSettings):
     embedding_base_url: str = ""
     embedding_model: str = "BAAI/bge-m3"
     vector_store: str = "qdrant"
+    qdrant_url: str = ""
     qdrant_path: str = "storage/qdrant"
     faiss_path: str = "storage/faiss"
     milvus_uri: str = ""

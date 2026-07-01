@@ -161,6 +161,43 @@ async def chat_react_mcp(payload: ChatRequest, request: Request) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.post("/agent/chat/react/stream")
+async def chat_react_stream(payload: ChatRequest, request: Request):
+    """ReAct + MCP + SSE streaming — combines thinking steps with real-time MCP tool events."""
+    actor = current_admin(request)
+    dataset_id = payload.dataset_id or first_accessible_dataset_id(actor)
+    if dataset_id:
+        ensure_dataset_access(actor, dataset_id)
+
+    async def event_generator():
+        import time as _time
+        yield f"data: {json.dumps({'type': 'plan', 'steps': ['意图分类', '工具调用', '数据查询', '洞察生成'], 'intent': '分析中', 'answer_type': 'data_analysis'}, ensure_ascii=False)}\n\n"
+
+        try:
+            result = await analyze_react(payload.question, payload.session_id, dataset_id, use_mcp=True)
+
+            # Emit plan steps as they happened
+            for step in result.get("plan", []):
+                step_title = "Step " + str(step.get('step','')) + ": " + str(step.get('tool',''))
+                yield "data: " + json.dumps({"type": "step", "step_id": step.get("step"), "title": step_title, "status": "completed", "detail": step.get("args_summary","")}, ensure_ascii=False) + "\n\n"
+
+            # Emit thinking/reasoning if available
+            insights = result.get("insights", [])
+            for insight in insights[:2]:
+                yield f"data: {json.dumps({'type': 'thinking', 'content': insight}, ensure_ascii=False)}\n\n"
+
+            # Emit final result
+            yield f"data: {json.dumps({'type': 'result', 'data': result}, ensure_ascii=False)}\n\n"
+            yield "data: [DONE]\n\n"
+
+            log_action("analysis_request", "session", result.get("session_id"), f"[ReAct+Stream] {payload.question}", actor=actor)
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
 def _report_or_404(session_id: str):
     try:
         return load_report_data(session_id)

@@ -67,11 +67,17 @@ _QDRANT_CLIENTS: dict[str, QdrantClient] = {}
 _QDRANT_CLIENTS_LOCK = threading.Lock()
 
 
-def _qdrant_client(path: str) -> QdrantClient:
+def _qdrant_client(settings: Settings | None = None) -> QdrantClient:
+    s = settings or get_settings()
+    url_key = s.qdrant_url or s.qdrant_path
     with _QDRANT_CLIENTS_LOCK:
-        if path not in _QDRANT_CLIENTS:
-            _QDRANT_CLIENTS[path] = QdrantClient(path=path)
-        return _QDRANT_CLIENTS[path]
+        if url_key not in _QDRANT_CLIENTS:
+            if s.qdrant_url:
+                _QDRANT_CLIENTS[url_key] = QdrantClient(url=s.qdrant_url)
+            else:
+                s.qdrant_directory.mkdir(parents=True, exist_ok=True)
+                _QDRANT_CLIENTS[url_key] = QdrantClient(path=str(s.qdrant_directory))
+        return _QDRANT_CLIENTS[url_key]
 
 
 def _close_clients() -> None:
@@ -85,10 +91,8 @@ atexit.register(_close_clients)
 
 
 def get_vector_client(settings: Settings | None = None) -> QdrantClient:
-    """Backward-compatible helper for the Qdrant Local client."""
-    settings = settings or get_settings()
-    settings.qdrant_directory.mkdir(parents=True, exist_ok=True)
-    return _qdrant_client(str(settings.qdrant_directory.resolve()))
+    """Get QdrantClient — URL mode if qdrant_url is set, otherwise local file mode."""
+    return _qdrant_client(settings or get_settings())
 
 
 async def embed_texts(texts: list[str], settings: Settings | None = None) -> list[list[float]]:

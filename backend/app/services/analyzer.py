@@ -17,6 +17,7 @@ from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, patch_insights, polish_insights, reflect_on_insights
 from .memory import compress_history, format_profile_context, llm_merge_followup, load_user_profile, update_user_profile_from_analysis
 from .planner import build_plan_steps, plan_titles
+from .semantic_cache import lookup as cache_lookup, store as cache_store
 from .python_executor import execute_python_analysis
 from .react_agent import run_react_loop
 from .security import validate_readonly_sql
@@ -924,6 +925,14 @@ async def analyze_react(question: str, session_id: str | None, dataset_id: int |
         if profile_ctx:
             react_question = f"{profile_ctx}\n{react_question}"
 
+    # Semantic cache: check before expensive LLM calls
+    cached = await cache_lookup(question)
+    if cached:
+        cached["session_id"] = session_id
+        cached["execution_mode"] = cached.get("execution_mode", "cached")
+        cached["_from_cache"] = True
+        return cached
+
     react_result = await run_react_loop(
         question=react_question,
         dataset_id=dataset["id"],
@@ -937,6 +946,9 @@ async def analyze_react(question: str, session_id: str | None, dataset_id: int |
     react_result["effective_question"] = effective_question
     _store_user(session_id, question, dataset["id"])
     _store_assistant(session_id, react_result, "analyze", dataset["id"])
+
+    # Cache the result for similar future queries
+    await cache_store(question, react_result)
 
     # M-002: update user profile after analysis
     if actor_id:

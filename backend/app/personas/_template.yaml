@@ -1,0 +1,28 @@
+# Persona 模板
+# 复制此文件并修改以创建新的分析角色
+
+name: custom_persona
+display_name: 自定义角色
+description: 填写角色描述
+
+triggers:
+  keywords: []
+  data_types: [tabular]
+
+frameworks:
+  - name: example_framework
+    display: 示例框架
+    trigger_rule: always
+    thinking: 这个框架的分析思路
+
+tools:
+  groups: [exploration, execution, output]
+
+output:
+  format: pdf
+  template: analytical_report
+  tone: "输出语气描述"
+  sections:
+    - cover_page
+    - executive_summary
+    - detailed_findings

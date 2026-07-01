@@ -8,8 +8,11 @@ from fastapi.responses import HTMLResponse, Response, StreamingResponse
 from ..db import connect
 from ..models import AnalysisResponse, ChatRequest, SessionCreate
 from ..services.analyzer import analyze, analyze_react, analyze_stream, analyze_with_document
+from ..services.analysis_planner import plan_analysis
 from ..services.audit import log_action
 from ..services.auth import current_admin
+from ..services.data_profiler import profile_dataset
+from ..services.meta_router import route_intent
 from ..services.permissions import ensure_dataset_access, first_accessible_dataset_id
 from ..services.reports import (
     build_docx_report,
@@ -92,6 +95,31 @@ def delete_session(session_id: str, request: Request) -> None:
     with connect() as conn:
         conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
     log_action("delete_session", "session", session_id, "删除历史对话", actor=actor)
+
+
+@router.post("/agent/report/plan")
+async def report_plan(
+    request: Request,
+    question: str = Form(default=""),
+    dataset_id: int | None = Form(default=None),
+) -> dict:
+    """Phase 1: Generate a multi-dimensional analysis plan for user preview.
+
+    Returns {plan, persona, clarification} for frontend to display.
+    """
+    actor = current_admin(request)
+    ds_id = dataset_id or first_accessible_dataset_id(actor)
+    if ds_id:
+        ensure_dataset_access(actor, ds_id)
+
+    data_profile = profile_dataset(ds_id) if ds_id else "数据集未指定"
+    intent = await route_intent(question or "全面分析", data_profile)
+
+    if not intent["info_sufficient"] and intent.get("clarification"):
+        return {"phase": "clarify", "clarification": intent["clarification"], "persona": intent["matched_persona"]}
+
+    plan = await plan_analysis(question, data_profile, intent["matched_persona"])
+    return {"phase": "plan", "plan": plan, "persona": intent["matched_persona"], "intent": intent}
 
 
 @router.post("/agent/chat/with-file", response_model=AnalysisResponse)

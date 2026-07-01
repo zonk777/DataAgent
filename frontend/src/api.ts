@@ -411,6 +411,12 @@ export const api = {
     if (sessionId) form.append('session_id', sessionId)
     return request<AnalysisResult>('/agent/chat/with-file', { method: 'POST', body: form })
   },
+  planReport: (question: string, datasetId?: number) => {
+    const form = new FormData()
+    form.append('question', question)
+    if (datasetId) form.append('dataset_id', String(datasetId))
+    return request<{ phase: string; plan?: any; persona?: string; clarification?: any }>('/agent/report/plan', { method: 'POST', body: form })
+  },
   auditLogs: (query = '') => request<AuditLog[]>(`/audit/logs${query}`),
   auditExportUrl: (query = '') => `${API_BASE}/audit/logs/export.xlsx${query}`,
   reportUrl: (sessionId: string, format: 'html' | 'docx' | 'pdf' | 'md' = 'html') => `${API_BASE}/reports/${sessionId}.${format}`,

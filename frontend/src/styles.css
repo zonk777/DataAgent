@@ -51,3 +51,32 @@ nav { display:grid;gap:7px;margin-top:25px; }.nav-item { border:0;background:tra
 .upload-progress{margin-top:11px;background:#f4fafc;border:1px solid #dceaf1;border-radius:11px;padding:10px}.upload-progress div{display:flex;align-items:center;justify-content:space-between;color:#4c6a7f;font-size:10px;margin-bottom:8px}.upload-progress b{color:#1685c7}.upload-progress i{display:block;height:8px;background:#e2edf4;border-radius:999px;overflow:hidden}.upload-progress i span{display:block;height:100%;background:linear-gradient(90deg,#39b7c3,#4a95f7);border-radius:inherit;transition:width .2s ease}
 .result-plan-card{margin-top:13px}.plan-step p small{display:block;color:#7d91a0;font-size:8px;margin-top:3px}.plan-step p{line-height:1.45}
 .mysql-options{display:flex;gap:10px;margin-top:10px;color:#60788b;font-size:10px}.mysql-options label{display:flex;align-items:center;gap:5px}.mysql-action-row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.mysql-action-row button{border:1px solid #d7e5ef;background:#fff;color:#286f91;border-radius:9px;padding:9px 8px;font-size:10px;font-weight:700}.mysql-status{margin-top:9px;background:#eafaf3;color:#087456;border:1px solid #cdeedc;border-radius:9px;padding:9px 10px;font-size:10px}.mysql-column-list{margin-top:10px;border:1px solid #e1edf3;background:#f8fcfd;border-radius:10px;padding:9px;display:flex;flex-wrap:wrap;gap:6px}.mysql-column-list small{width:100%;color:#7890a1;font-size:9px}.mysql-column-list span{background:white;border:1px solid #dce8ef;color:#456277;border-radius:999px;padding:4px 7px;font-size:9px}
+
+/* ── Thinking Block (collapsible reasoning) ── */
+.thinking-block{border:1px solid #d6e8f0;border-radius:13px;overflow:hidden;background:#f8fcfe;transition:all .25s ease}
+.thinking-block.collapsed{background:#f4f8fb}
+.thinking-block-header{width:100%;border:0;background:transparent;padding:11px 14px;display:flex;align-items:center;gap:9px;cursor:pointer;color:#4e6d82;font-size:11px;text-align:left;transition:background .18s}
+.thinking-block-header:hover{background:rgba(22,119,255,.04)}
+.thinking-block-header .arrow{font-size:10px;color:#8aa4b6;transition:transform .2s;width:14px;text-align:center}
+.thinking-block-header .summary{flex:1;display:flex;align-items:center;gap:4px}
+.thinking-block-header .summary em{font-style:normal;color:#1796a8;font-size:9px;background:#e4f6f9;padding:2px 7px;border-radius:8px}
+.thinking-block-body{padding:3px 14px 14px}
+.thinking-steps{display:grid;gap:6px}
+.thinking-step{display:flex;align-items:center;gap:8px;font-size:10px;color:#546d80;padding:5px 8px;border-radius:7px;background:#f0f6fa;transition:all .2s}
+.thinking-step.running{background:#eaf5ff;color:#1e6fb0}
+.thinking-step.completed{background:#edfaf5;color:#0d7a56}
+.thinking-step.error{background:#fff4f5;color:#c0394b}
+.thinking-step .dot{width:18px;height:18px;border-radius:50%;display:grid;place-items:center;font-size:9px;background:#e4edf3;color:#7b96a9}
+.thinking-step.running .dot{background:#d2e8ff;color:#1979d4;animation:pulse-dot .8s infinite}
+.thinking-step.completed .dot{background:#cbf0df;color:#0f9b65}
+.thinking-step.error .dot{background:#ffe0e4;color:#d43d56}
+.thinking-step .title{flex:1;font-weight:600}
+.thinking-step .detail{font-size:8px;color:#879dad;margin-left:auto}
+@keyframes pulse-dot{50%{transform:scale(1.15);opacity:.7}}
+.thinking-text{display:flex;align-items:flex-start;gap:7px;margin-top:10px;padding:9px 11px;background:#f2f8fc;border-radius:9px;font-size:10px;color:#4b6d84;line-height:1.6}
+.thinking-text>:first-child{flex-shrink:0;margin-top:2px;color:#17a2b8}
+
+/* ── Typewriter ── */
+.typewriter-text{white-space:pre-wrap}
+.typewriter-cursor{display:inline;color:#1677ff;font-weight:700;animation:blink-cursor .7s step-end infinite}
+@keyframes blink-cursor{0%,100%{opacity:1}50%{opacity:0}}

@@ -2,8 +2,10 @@
 import { ref } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
 import ResultChart from '../components/ResultChart.vue'
+import ThinkingBlock from '../components/ThinkingBlock.vue'
+import TypewriterText from '../components/TypewriterText.vue'
 import { api } from '../api'
-import type { AnalysisResult, ChatMessage, SessionSummary } from '../types'
+import type { AnalysisResult, ChatMessage, SessionSummary, ThinkingStep } from '../types'
 
 const props = defineProps<{
   sessions: SessionSummary[]
@@ -12,6 +14,9 @@ const props = defineProps<{
   loading: boolean
   sessionId: string | undefined
   examples: string[]
+  thinkingSteps: ThinkingStep[]
+  thinkingText: string
+  thinkingCollapsed: boolean
 }>()
 
 const emit = defineEmits<{
@@ -21,10 +26,15 @@ const emit = defineEmits<{
   newSession: []
   showResult: [msg: ChatMessage]
   updateSessions: []
+  toggleThinking: []
 }>()
 
 const question = ref('')
 const showSql = ref(false)
+
+function isLatestMessage(index: number) {
+  return index === props.chatMessages.length - 1
+}
 </script>
 
 <template>
@@ -46,12 +56,20 @@ const showSql = ref(false)
         <div v-if="chatMessages.length" class="conversation-messages">
           <article v-for="(message, index) in chatMessages" :key="message.id || index" :class="['conversation-message', message.role]" @click="emit('showResult', message)">
             <small>{{ message.role === 'user' ? '你' : 'DataAgent' }}</small>
-            <p>{{ message.content }}</p>
+            <TypewriterText v-if="message._streamed" :text="message.content" :enabled="true" />
+            <p v-else>{{ message.content }}</p>
             <em v-if="message.payload">查看该轮结果 →</em>
           </article>
         </div>
         <div v-else class="empty-chat"><AppIcon name="spark" :size="24"/><p>开始一次数据分析，或询问指标口径与业务规则。</p></div>
-        <div v-if="loading" class="thinking"><i/><i/><i/><span>正在结合上下文进行分析...</span></div>
+        <ThinkingBlock
+          v-if="thinkingSteps.length"
+          :steps="thinkingSteps"
+          :thinking-text="thinkingText"
+          :is-streaming="loading"
+          :collapsed="thinkingCollapsed"
+          @toggle="emit('toggleThinking')"
+        />
         <div v-if="result?.context_applied" class="context-note"><AppIcon name="check" :size="15"/>已继承上一轮的分析条件</div>
         <div class="followups"><small>快捷提问</small><div><button v-for="item in examples" :key="item" @click="emit('analyze', item)">{{ item }}</button></div></div>
         <div class="chat-box"><textarea v-model="question" rows="2" placeholder="可追问：只看华东；按产品拆分；或询问投诉率如何计算" @keydown.enter.exact.prevent="emit('analyze', question)"/><button :disabled="loading" @click="emit('analyze', question)"><AppIcon name="send" :size="18" /></button></div>

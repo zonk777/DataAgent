@@ -672,32 +672,115 @@ async def _anomaly_attribution_insights(
 
 
 async def analyze(question: str, session_id: str | None, dataset_id: int | None) -> dict:
+    """Non-streaming analysis: runs the full pipeline and returns the result dict."""
+    result = None
+    async for event in analyze_stream(question, session_id, dataset_id):
+        if event["type"] == "result":
+            result = event["data"]
+    if result is None:
+        raise ValueError("分析流程未返回结果")
+    return result
+
+
+async def analyze_stream(question: str, session_id: str | None, dataset_id: int | None):
+    """Streaming analysis: yields SSE events as the pipeline progresses."""
     settings = get_settings()
     session_id = session_id or uuid.uuid4().hex
     history = _load_history(session_id)
     effective_question, context_applied = _merge_followup(question, history)
+
+    # Step 1: Intent classification
     intent_result = await classify_intent(effective_question, history)
     if _is_knowledge_question(question, history) and intent_result.label == "data_query":
         intent_result = IntentResult("knowledge_qa", 0.86, "rules", "知识问答追问兜底")
     _store_user(session_id, question, dataset_id)
 
-    if intent_result.label == "knowledge_qa":
-        return await _answer_knowledge(
-            question, effective_question, session_id, dataset_id, history, context_applied, intent_result
-        )
+    # Emit plan early so the frontend can show steps immediately
+    plan_step_titles = _build_stream_plan_titles(intent_result, "knowledge_qa" if intent_result.label == "knowledge_qa" else "data_analysis")
+    yield {"type": "plan", "steps": plan_step_titles, "intent": intent_result.display_name, "answer_type": intent_result.label}
 
+    # Knowledge QA path
+    if intent_result.label == "knowledge_qa":
+        yield {"type": "step", "step_id": 1, "title": plan_step_titles[0] if len(plan_step_titles) > 0 else "意图识别", "status": "running"}
+        yield {"type": "thinking", "content": f"识别意图为：{intent_result.display_name}，置信度 {intent_result.confidence:.0%}"}
+        yield {"type": "step", "step_id": 1, "title": plan_step_titles[0] if len(plan_step_titles) > 0 else "意图识别", "status": "completed", "detail": intent_result.display_name}
+
+        yield {"type": "step", "step_id": 2, "title": plan_step_titles[1] if len(plan_step_titles) > 1 else "检索知识库", "status": "running"}
+        yield {"type": "thinking", "content": "正在从知识库中检索相关业务知识..."}
+        knowledge = await search_knowledge(effective_question, dataset_id, limit=5)
+        yield {"type": "step", "step_id": 2, "title": plan_step_titles[1] if len(plan_step_titles) > 1 else "检索知识库", "status": "completed", "detail": f"找到 {len(knowledge)} 条相关知识"}
+
+        yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "生成回答", "status": "running"}
+        yield {"type": "thinking", "content": f"正在结合 {len(knowledge)} 条业务知识生成回答..."}
+        answer = await answer_from_knowledge(question, knowledge, history)
+        yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "生成回答", "status": "completed", "detail": "回答已生成"}
+
+        execution_mode = "llm-assisted" if settings.llm_configured else "knowledge-extract"
+        plan_steps = build_plan_steps(
+            intent=intent_result,
+            answer_type="knowledge_qa",
+            execution_mode=execution_mode,
+        )
+        payload = {
+            "session_id": session_id,
+            "message": "已根据企业知识库回答。",
+            "intent": intent_result.display_name,
+            "intent_label": intent_result.label,
+            "intent_confidence": intent_result.confidence,
+            "intent_method": intent_result.method,
+            "intent_reason": intent_result.reason,
+            "plan": plan_titles(plan_steps),
+            "plan_steps": plan_steps,
+            "sql": "",
+            "columns": [],
+            "rows": [],
+            "chart": {
+                "type": "none",
+                "title": "企业知识库回答",
+                "x_field": None,
+                "y_field": None,
+                "series_name": None,
+                "series_field": None,
+                "series_fields": [],
+            },
+            "insights": [answer],
+            "knowledge_refs": knowledge,
+            "execution_mode": execution_mode,
+            "answer_type": "knowledge_qa",
+            "context_applied": context_applied,
+            "effective_question": effective_question,
+        }
+        _store_assistant(session_id, payload, "knowledge_qa", dataset_id)
+        yield {"type": "result", "data": payload}
+        yield {"type": "done"}
+        return
+
+    # Data analysis path
+    yield {"type": "step", "step_id": 1, "title": plan_step_titles[0] if len(plan_step_titles) > 0 else "意图识别", "status": "running"}
+    yield {"type": "thinking", "content": f"识别意图为：{intent_result.display_name}，置信度 {intent_result.confidence:.0%}"}
+    yield {"type": "step", "step_id": 1, "title": plan_step_titles[0] if len(plan_step_titles) > 0 else "意图识别", "status": "completed", "detail": intent_result.display_name}
+
+    yield {"type": "step", "step_id": 2, "title": plan_step_titles[1] if len(plan_step_titles) > 1 else "分析数据集", "status": "running"}
     dataset = _dataset(dataset_id)
     dataset_id = dataset["id"]
+    yield {"type": "thinking", "content": f"使用数据集「{dataset['name']}」，包含 {len(dataset['columns'])} 个字段、约 {dataset.get('row_count', '?')} 条数据"}
+    yield {"type": "step", "step_id": 2, "title": plan_step_titles[1] if len(plan_step_titles) > 1 else "分析数据集", "status": "completed", "detail": dataset["name"]}
+
+    yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "running"}
     query_plan = _build_query(effective_question, dataset, settings.query_row_limit)
+    yield {"type": "thinking", "content": f"正在根据表 {dataset['table_name']} 的字段生成 SQL 查询..."}
     safe_sql, rows, plan_source, sql_repair = await _execute_sql_with_repair(
         effective_question,
         dataset,
         query_plan,
         settings.query_row_limit,
     )
+    yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "completed", "detail": f"返回 {len(rows)} 条结果"}
 
+    yield {"type": "step", "step_id": 4, "title": plan_step_titles[3] if len(plan_step_titles) > 3 else "生成洞察", "status": "running"}
     knowledge = await search_knowledge(effective_question, dataset_id)
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)
+    yield {"type": "thinking", "content": f"查询返回 {len(rows)} 条结果" + (f"，结合 {len(knowledge)} 条业务知识提炼洞察..." if knowledge else "...")}
     if intent_result.label == "anomaly_attribution":
         insights = await _anomaly_attribution_insights(effective_question, dataset, query_plan, rows)
     else:
@@ -711,6 +794,8 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
         query_plan.series_fields,
     )
     chart_type = chart_recommendation["type"]
+    yield {"type": "step", "step_id": 4, "title": plan_step_titles[3] if len(plan_step_titles) > 3 else "生成洞察", "status": "completed", "detail": f"{len(insights)} 条洞察"}
+
     intent = intent_result.display_name
     scope_parts = [item for item in (query_plan.time_description, *query_plan.series_fields) if item]
     scope = "、".join(scope_parts) or query_plan.x_field
@@ -733,6 +818,8 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
     python_code: str | None = None
     analysis_engine = "sql"
     if settings.llm_configured and _needs_python_analysis(effective_question, intent_result.label):
+        yield {"type": "step", "step_id": 5, "title": "深度分析 (Python/Pandas)", "status": "running"}
+        yield {"type": "thinking", "content": "正在使用 Python/Pandas 进行深度分析..."}
         python_result = await execute_python_analysis(
             effective_question,
             dataset["table_name"],
@@ -760,6 +847,9 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
                 rows = generated_rows
             chart = _apply_python_chart(chart, python_payload.get("chart_suggestion"))
             chart_type = chart["type"]
+        yield {"type": "step", "step_id": 5, "title": "深度分析 (Python/Pandas)", "status": "completed", "detail": "完成" if python_analysis and python_analysis["success"] else "未执行"}
+        yield {"type": "thinking", "content": "已使用 Python/Pandas 完成深度分析" if (python_analysis and python_analysis["success"]) else "Python 分析未执行，使用 SQL 结果"}
+
     plan_steps = build_plan_steps(
         intent=intent_result,
         answer_type="data_analysis",
@@ -795,4 +885,14 @@ async def analyze(question: str, session_id: str | None, dataset_id: int | None)
         "effective_question": effective_question,
     }
     _store_assistant(session_id, payload, "analyze", dataset_id)
-    return payload
+    yield {"type": "result", "data": payload}
+    yield {"type": "done"}
+
+
+def _build_stream_plan_titles(intent_result, answer_type: str) -> list[str]:
+    """Generate step titles for the streaming plan event (before full plan_steps are built)."""
+    if answer_type == "knowledge_qa":
+        return ["识别意图", "检索知识库", "生成回答"]
+    if intent_result.label == "anomaly_attribution":
+        return ["识别意图", "分析数据集", "构建查询", "异常归因分析"]
+    return ["识别意图", "分析数据集", "构建查询", "生成洞察"]

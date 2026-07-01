@@ -1,4 +1,4 @@
-import type { AdminUser, AnalysisResult, AuditLog, ConfigStatus, DashboardData, Dataset, DatasetQuality, KnowledgeItem, SessionDetail, SessionSummary } from './types'
+import type { AdminUser, AnalysisResult, AuditLog, ConfigStatus, DashboardData, Dataset, DatasetQuality, KnowledgeItem, SessionDetail, SessionSummary, StreamCallbacks } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 const CHUNK_UPLOAD_THRESHOLD = 8 * 1024 * 1024
@@ -254,6 +254,84 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ question, dataset_id: datasetId, session_id: sessionId }),
     }),
+  analyzeStream: (
+    question: string,
+    datasetId: number | undefined,
+    sessionId: string | undefined,
+    callbacks: StreamCallbacks,
+  ) => {
+    const controller = new AbortController()
+
+    const run = async () => {
+      try {
+        const response = await fetch(`${API_BASE}/agent/chat/stream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ question, dataset_id: datasetId, session_id: sessionId }),
+          credentials: 'include',
+          signal: controller.signal,
+        })
+
+        if (!response.ok) {
+          const body = await response.json().catch(() => ({ detail: '请求失败' }))
+          callbacks.onError(body.detail || `请求失败 (${response.status})`)
+          return
+        }
+
+        const reader = response.body?.getReader()
+        if (!reader) { callbacks.onError('浏览器不支持流式读取'); return }
+
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+
+          const lines = buffer.split('\n')
+          buffer = lines.pop() || ''
+
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const event = JSON.parse(line.slice(6))
+                switch (event.type) {
+                  case 'plan':
+                    callbacks.onPlan(event.steps || [], event.intent || '', event.answer_type || '')
+                    break
+                  case 'step':
+                    callbacks.onStep(event.step_id || 0, event.title || '', event.status || 'pending', event.detail)
+                    break
+                  case 'thinking':
+                    callbacks.onThinking(event.content || '')
+                    break
+                  case 'result':
+                    callbacks.onResult(event.data)
+                    break
+                  case 'done':
+                    callbacks.onDone()
+                    break
+                  case 'error':
+                    callbacks.onError(event.message || '未知错误')
+                    break
+                }
+              } catch {
+                // skip malformed events
+              }
+            }
+          }
+        }
+      } catch (err: any) {
+        if (err.name !== 'AbortError') {
+          callbacks.onError(err.message || '网络连接失败')
+        }
+      }
+    }
+
+    run()
+    return { cancel: () => controller.abort() }
+  },
   upload: (file: File, name: string, description: string, onProgress?: (progress: UploadProgress) => void) =>
     file.size > CHUNK_UPLOAD_THRESHOLD
       ? uploadChunkedFile(file, name, description, onProgress)

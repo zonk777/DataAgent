@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import AppIcon from './components/AppIcon.vue'
 import { api } from './api'
-import type { AdminUser, AnalysisResult, ChatMessage, ConfigStatus, DashboardData, Dataset, KnowledgeItem, SessionSummary, ViewName } from './types'
+import type { AdminUser, AnalysisResult, ChatMessage, ConfigStatus, DashboardData, Dataset, KnowledgeItem, SessionSummary, ThinkingStep, ViewName } from './types'
 import OverviewView from './views/OverviewView.vue'
 import AnalystView from './views/AnalystView.vue'
 import DatasetsView from './views/DatasetsView.vue'
@@ -24,6 +24,10 @@ const result = ref<AnalysisResult | null>(null)
 const error = ref('')
 const loading = ref(false)
 const sessionId = ref<string>()
+const thinkingSteps = ref<ThinkingStep[]>([])
+const thinkingText = ref('')
+const thinkingCollapsed = ref(false)
+const streamCancel = ref<(() => void) | null>(null)
 const currentAdmin = ref<AdminUser | null>(null)
 const admins = ref<AdminUser[]>([])
 const authChecked = ref(false)
@@ -69,17 +73,74 @@ async function logout() {
   currentAdmin.value = null; dashboard.value = null; datasets.value = []; config.value = null; knowledge.value = []; sessions.value = []; chatMessages.value = []; result.value = null; sessionId.value = undefined; activeView.value = 'overview'
 }
 
-async function analyze(q: string) {
+function analyze(q: string) {
   const v = q.trim(); if (!v) return
   loading.value = true; error.value = ''; activeView.value = 'analyst'
+
+  // Reset streaming state
+  thinkingSteps.value = []
+  thinkingText.value = ''
+  thinkingCollapsed.value = false
+
+  // Cancel any in-flight stream
+  streamCancel.value?.()
+
   chatMessages.value.push({ role: 'user', content: v })
-  try {
-    result.value = await api.analyze(v, selectedDatasetId.value, sessionId.value)
-    sessionId.value = result.value.session_id
-    chatMessages.value.push({ role: 'assistant', content: result.value.insights.join('\n'), payload: result.value })
-    sessions.value = await api.sessions(); dashboard.value = await api.dashboard()
-  } catch (err: any) { chatMessages.value.pop(); error.value = err.message || '分析失败' }
-  finally { loading.value = false }
+
+  // Add a placeholder assistant message that will be updated
+  const assistantMsg: ChatMessage = { role: 'assistant', content: '', payload: null }
+  chatMessages.value.push(assistantMsg)
+
+  streamCancel.value = api.analyzeStream(v, selectedDatasetId.value, sessionId.value, {
+    onPlan(steps, intent, answerType) {
+      thinkingSteps.value = steps.map((title, i) => ({
+        id: i + 1,
+        title,
+        status: 'pending' as const,
+      }))
+    },
+    onStep(stepId, title, status, detail) {
+      const existing = thinkingSteps.value.find(s => s.id === stepId)
+      if (existing) {
+        existing.status = status as ThinkingStep['status']
+        if (detail) existing.detail = detail
+      } else if (status === 'running') {
+        thinkingSteps.value.push({ id: stepId, title, status: 'running', detail })
+      }
+    },
+    onThinking(content) {
+      if (thinkingText.value) {
+        thinkingText.value += '\n' + content
+      } else {
+        thinkingText.value = content
+      }
+    },
+    onResult(data) {
+      result.value = data
+      sessionId.value = data.session_id
+      assistantMsg.content = data.insights.join('\n')
+      assistantMsg.payload = data
+      assistantMsg._streamed = true
+    },
+    async onDone() {
+      loading.value = false
+      // Auto-collapse thinking after a short delay
+      setTimeout(() => { thinkingCollapsed.value = true }, 1500)
+      // Refresh sessions and dashboard
+      sessions.value = await api.sessions()
+      dashboard.value = await api.dashboard()
+    },
+    onError(message) {
+      // Remove the placeholder assistant message
+      chatMessages.value.pop()
+      error.value = message || '分析失败'
+      loading.value = false
+    },
+  })
+}
+
+function toggleThinking() {
+  thinkingCollapsed.value = !thinkingCollapsed.value
 }
 
 async function openSession(id: string) {
@@ -156,7 +217,7 @@ onMounted(bootstrap)
       <div v-if="error" class="error-banner">{{ error }} <button @click="loadBase">重新连接</button></div>
 
       <OverviewView v-if="activeView === 'overview'" :dashboard="dashboard" :datasets="datasets" @analyze="analyze" @inspect="inspectDataset" @nav="(v: string) => activeView = v as ViewName" />
-      <AnalystView v-else-if="activeView === 'analyst'" :sessions="sessions" :chat-messages="chatMessages" :result="result" :loading="loading" :session-id="sessionId" :examples="examples" @analyze="analyze" @open-session="openSession" @delete-session="deleteSession" @new-session="sessionId = undefined; chatMessages = []; result = null" @show-result="(m: ChatMessage) => { if (m.payload) result = m.payload }" />
+      <AnalystView v-else-if="activeView === 'analyst'" :sessions="sessions" :chat-messages="chatMessages" :result="result" :loading="loading" :session-id="sessionId" :examples="examples" :thinking-steps="thinkingSteps" :thinking-text="thinkingText" :thinking-collapsed="thinkingCollapsed" @analyze="analyze" @open-session="openSession" @delete-session="deleteSession" @new-session="sessionId = undefined; chatMessages = []; result = null; thinkingSteps = []; thinkingText = ''" @show-result="(m: ChatMessage) => { if (m.payload) result = m.payload }" @toggle-thinking="toggleThinking" />
       <DatasetsView v-else-if="activeView === 'datasets'" :datasets="datasets" :selected="selectedDataset" :selected-id="selectedDatasetId" @upload="doUpload" @inspect="inspectDataset" />
       <KnowledgeView v-else-if="activeView === 'knowledge'" :items="knowledge" @add="addKnowledge" @del="deleteKnowledge" />
       <AuditView v-else-if="activeView === 'audit'" />

@@ -125,6 +125,37 @@ export interface ChatMessage {
   content: string
   payload?: AnalysisResult | null
   created_at?: string
+  _streamed?: boolean
+}
+
+export interface ThinkingStep {
+  id: number
+  title: string
+  status: 'pending' | 'running' | 'completed' | 'error'
+  detail?: string
+}
+
+export interface StreamEvent {
+  type: 'plan' | 'step' | 'thinking' | 'result' | 'done' | 'error'
+  steps?: string[]
+  intent?: string
+  answer_type?: string
+  step_id?: number
+  title?: string
+  status?: string
+  detail?: string
+  content?: string
+  data?: AnalysisResult
+  message?: string
+}
+
+export interface StreamCallbacks {
+  onPlan: (steps: string[], intent: string, answerType: string) => void
+  onStep: (stepId: number, title: string, status: string, detail?: string) => void
+  onThinking: (content: string) => void
+  onResult: (data: AnalysisResult) => void
+  onDone: () => void
+  onError: (message: string) => void
 }
 
 export interface SessionSummary {

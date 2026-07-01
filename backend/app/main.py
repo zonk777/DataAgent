@@ -1,6 +1,8 @@
+import time
+from collections import defaultdict
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
@@ -9,6 +11,11 @@ from .db import initialize_database
 from .routers import agent, audit, auth, datasets, knowledge, system
 from .services.auth import SESSION_COOKIE, admin_from_session
 from .services.vector_store import VectorStoreError, sync_knowledge
+
+# ---- in-memory rate limiter ----
+_rate_window = 60
+_rate_limits: dict[str, int] = {"auth/login": 5, "agent/chat": 30, "datasets/upload": 10}
+_rate_buckets: dict[str, list[float]] = defaultdict(list)
 
 
 @asynccontextmanager
@@ -43,6 +50,31 @@ PUBLIC_PATHS = {
     "/api/v1/health",
     "/api/v1/auth/login",
 }
+
+
+def _client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    return (forwarded or "").split(",")[0].strip() or (request.client.host if request.client else "unknown")
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    path = request.url.path
+    bucket_key = None
+    for pattern, limit in _rate_limits.items():
+        if f"/{pattern}" in path or path.endswith(f"/{pattern}"):
+            bucket_key = pattern
+            break
+    if bucket_key:
+        now = time.time()
+        ip = _client_ip(request)
+        full_key = f"{ip}:{bucket_key}"
+        bucket = _rate_buckets[full_key]
+        bucket[:] = [t for t in bucket if now - t < _rate_window]
+        if len(bucket) >= _rate_limits[bucket_key]:
+            return JSONResponse({"detail": "请求过于频繁，请稍后再试"}, status_code=429)
+        bucket.append(now)
+    return await call_next(request)
 
 
 @app.middleware("http")

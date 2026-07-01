@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Request, Response, status
 
+from ..config import get_settings
 from ..models import AdminCreate, AdminUpdate, LoginRequest
 from ..services.audit import log_action
 from ..services.auth import (
@@ -33,6 +34,7 @@ def login(payload: LoginRequest, response: Response) -> dict:
         token,
         httponly=True,
         samesite="lax",
+        secure=get_settings().environment == "production",
         max_age=7 * 24 * 3600,
         path="/",
     )

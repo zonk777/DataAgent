@@ -14,7 +14,7 @@ from ..db import connect, using_mysql
 from .intent_classifier import IntentResult, classify_intent
 from .chart_recommender import recommend_chart
 from .knowledge import search_knowledge
-from .llm import answer_from_knowledge, polish_insights
+from .llm import answer_from_knowledge, patch_insights, polish_insights, reflect_on_insights
 from .planner import build_plan_steps, plan_titles
 from .python_executor import execute_python_analysis
 from .react_agent import run_react_loop
@@ -244,9 +244,111 @@ def _jsonable_row(row: dict[str, Any]) -> dict[str, Any]:
     return {key: _jsonable_value(value) for key, value in row.items()}
 
 
+def _extract_anchors(question: str) -> list[str]:
+    """Extract 3 immutable anchor points from the user question.
+
+    A-005 safety mechanism ①: these anchors are the ONLY things the reflector
+    is allowed to check — it cannot invent its own quality criteria.
+
+    Anchors are deterministically extracted via keyword matching (no LLM cost).
+    Each anchor represents a dimension the answer MUST cover.
+    """
+    anchors: list[str] = []
+
+    # Priority 1: metric terms — what the user asks to measure
+    metric_map = {
+        "投诉率": "投诉率分析",
+        "投诉": "投诉分析",
+        "转化率": "转化率分析",
+        "转化": "转化分析",
+        "利润": "利润分析",
+        "毛利": "利润分析",
+        "订单": "订单量分析",
+        "销量": "销量分析",
+        "销售额": "销售额分析",
+        "营收": "销售额分析",
+        "金额": "金额分析",
+    }
+    for keyword, anchor in metric_map.items():
+        if keyword in question and anchor not in anchors:
+            anchors.append(anchor)
+            break
+
+    # Priority 2: dimension terms — what breakdown the user wants
+    dim_map = {
+        "地区": "地区维度对比",
+        "区域": "地区维度对比",
+        "大区": "地区维度对比",
+        "产品": "产品维度对比",
+        "品类": "产品维度对比",
+        "类别": "产品维度对比",
+        "渠道": "渠道维度对比",
+        "按月": "时间趋势",
+        "每月": "时间趋势",
+        "月度": "时间趋势",
+        "按天": "时间趋势",
+        "每日": "时间趋势",
+        "趋势": "时间趋势",
+        "走势": "时间趋势",
+    }
+    for keyword, anchor in dim_map.items():
+        if keyword in question and anchor not in anchors:
+            anchors.append(anchor)
+            if len(anchors) >= 3:
+                break
+
+    # Priority 3: analysis depth terms — what kind of insight the user wants
+    depth_map = {
+        "同比": "同比变化",
+        "环比": "环比变化",
+        "异常": "异常检测",
+        "归因": "原因归因",
+        "原因": "原因归因",
+        "波动": "波动分析",
+        "下滑": "变化趋势",
+        "下降": "变化趋势",
+        "增长率": "增长率分析",
+        "预测": "趋势预测",
+        "排行": "排名分析",
+        "最高": "排名分析",
+        "最低": "排名分析",
+    }
+    for keyword, anchor in depth_map.items():
+        if keyword in question and anchor not in anchors:
+            anchors.append(anchor)
+            if len(anchors) >= 3:
+                break
+
+    # Fallback: if fewer than 2 anchors, add generic ones from the question
+    if len(anchors) < 2:
+        if "对比" in question or "比较" in question:
+            if "对比分析" not in anchors:
+                anchors.append("对比分析")
+        if "统计" in question or "分析" in question:
+            if "数据总结" not in anchors:
+                anchors.append("数据总结")
+    # Still not enough — fill with generic anchors (no duplicates)
+    generic_fallbacks = ["数据总结", "关键发现"]
+    for fb in generic_fallbacks:
+        if len(anchors) >= 2:
+            break
+        if fb not in anchors:
+            anchors.append(fb)
+
+    return anchors[:3]
+
+
 def _draft_insights(rows: list[dict[str, Any]], x_field: str, y_field: str, series_fields: list[str]) -> list[str]:
+    """Generate deterministic draft insights with statistical depth beyond max/min/total.
+
+    Q-006: Adds mean, std, CV, anomaly detection (>2σ), trend direction, and
+    per-category deviation analysis so the draft is richer before LLM polish.
+    """
+    import math
+
     if not rows:
         return ["当前筛选条件下没有匹配数据，请调整时间或维度后重试。"]
+
     if series_fields:
         totals: dict[str, float] = defaultdict(float)
         for row in rows:
@@ -254,18 +356,117 @@ def _draft_insights(rows: list[dict[str, Any]], x_field: str, y_field: str, seri
         ranked = sorted(totals.items(), key=lambda item: item[1], reverse=True)
         peak = max(rows, key=lambda row: float(row[y_field] or 0))
         peak_series = _series_label(peak, series_fields)
-        return [
+
+        # --- 基础排名洞察 ---
+        insights = [
             f"{ranked[0][0]}累计{y_field}最高，为 {ranked[0][1]:,.2f}。",
             f"{ranked[-1][0]}累计{y_field}最低，为 {ranked[-1][1]:,.2f}。",
             f"单点峰值出现在 {peak[x_field]}，{peak_series}的{y_field}为 {float(peak[y_field] or 0):,.2f}。",
         ]
+
+        # --- Q-006: 统计深度 ---
+        values = list(totals.values())
+        n = len(values)
+        if n >= 2:
+            mean_val = sum(values) / n
+            variance = sum((v - mean_val) ** 2 for v in values) / n
+            std_val = math.sqrt(variance)
+            cv = (std_val / mean_val * 100) if mean_val != 0 else 0
+
+            # 偏离度分析：各品类偏离均值的程度
+            deviations = [
+                (label, val, (val - mean_val) / mean_val * 100 if mean_val != 0 else 0)
+                for label, val in ranked
+            ]
+            above_avg = [(l, v, d) for l, v, d in deviations if d > 20]
+            below_avg = [(l, v, d) for l, v, d in deviations if d < -20]
+
+            if above_avg:
+                top_deviant = above_avg[0]
+                insights.append(
+                    f"「{top_deviant[0]}」显著高于均值 {mean_val:,.2f}（偏离 +{top_deviant[2]:.0f}%），"
+                    f"是拉动{y_field}的主要力量。"
+                )
+            if below_avg:
+                bottom_deviant = below_avg[-1]
+                insights.append(
+                    f"「{bottom_deviant[0]}」显著低于均值（偏离 {bottom_deviant[2]:.0f}%），"
+                    f"可能存在优化空间。"
+                )
+
+            # 异常检测（>2σ）
+            if std_val > 0:
+                anomalies = [(l, v) for l, v in ranked if abs(v - mean_val) > 2 * std_val]
+                if anomalies:
+                    anomaly_desc = "、".join(
+                        f"「{l}」({v:,.2f})" for l, v in anomalies[:3]
+                    )
+                    insights.append(f"⚠ 异常值检测（偏离均值 > 2σ）：{anomaly_desc}。")
+
+            # 集中度
+            if n >= 3:
+                top3_share = sum(v for _, v in ranked[:3]) / sum(values) * 100
+                if top3_share > 80:
+                    insights.append(f"集中度偏高：TOP3 品类合计占比 {top3_share:.0f}%，业务依赖集中。")
+
+        return insights
+
     numeric = [(row[x_field], float(row[y_field] or 0)) for row in rows]
+    n = len(numeric)
+    values_list = [v for _, v in numeric]
+    total = sum(values_list)
+    mean_val = total / n if n else 0
+
     highest = max(numeric, key=lambda item: item[1])
     lowest = min(numeric, key=lambda item: item[1])
     insights = [f"{highest[0]}的{y_field}最高，为 {highest[1]:,.2f}。"]
-    if len(numeric) > 1:
+
+    if n > 1:
         insights.append(f"{lowest[0]}的{y_field}最低，为 {lowest[1]:,.2f}。")
-    insights.append(f"当前结果合计为 {sum(value for _, value in numeric):,.2f}。")
+
+    # --- Q-006: 统计深度（无维度拆分场景）---
+    if n >= 2:
+        variance = sum((v - mean_val) ** 2 for v in values_list) / n
+        std_val = math.sqrt(variance)
+        cv = (std_val / mean_val * 100) if mean_val != 0 else 0
+        insights.append(
+            f"均值 {mean_val:,.2f}，标准差 {std_val:,.2f}（变异系数 {cv:.1f}%），"
+            f"合计 {total:,.2f}。"
+        )
+
+        # 趋势方向判断（适用于有序 x 轴，如日期）
+        if n >= 3:
+            first_half = sum(values_list[: n // 2])
+            second_half = sum(values_list[n - n // 2 :])
+            if second_half > first_half * 1.1:
+                direction = "上升"
+            elif first_half > second_half * 1.1:
+                direction = "下降"
+            else:
+                direction = "平稳"
+            insights.append(f"趋势方向：{direction}（后半段合计 {second_half:,.2f} vs 前半段 {first_half:,.2f}）。")
+
+        # 异常检测（>2σ）
+        if std_val > 0:
+            anomalies = [
+                (label, val)
+                for label, val in numeric
+                if abs(val - mean_val) > 2 * std_val
+            ]
+            if anomalies:
+                anomaly_desc = "、".join(
+                    f"{l}({v:,.2f})" for l, v in anomalies[:3]
+                )
+                insights.append(f"⚠ 异常值（偏离均值 > 2σ）：{anomaly_desc}。")
+
+        # 极差比
+        if lowest[1] > 0:
+            range_ratio = highest[1] / lowest[1]
+            if range_ratio > 5:
+                insights.append(f"极差比 {range_ratio:.1f}:1，数据波动较大，建议关注波动原因。")
+    else:
+        insights.append(f"当前结果合计为 {total:,.2f}。")
+
     return insights
 
 
@@ -891,6 +1092,45 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         yield {"type": "step", "step_id": 5, "title": "深度分析 (Python/Pandas)", "status": "completed", "detail": "完成" if python_analysis and python_analysis["success"] else "未执行"}
         yield {"type": "thinking", "content": "已使用 Python/Pandas 完成深度分析" if (python_analysis and python_analysis["success"]) else "Python 分析未执行，使用 SQL 结果"}
 
+    # ══════════════════════════════════════════════════════════════════════
+    # A-003 / A-005: Anchored Lightweight Reflection
+    # ──────────────────────────────────────────────────────────────────────
+    # Three safety mechanisms:
+    #   ① Immutable anchors — only check 3 extracted must-answer points
+    #   ② Hard limit — 1 round reflect + 1 round patch; fallback to original
+    #   ③ Delta fix — patch is APPENDED, existing content is never rewritten
+    # ══════════════════════════════════════════════════════════════════════
+    reflection_applied = False
+    if settings.llm_configured and insights:
+        try:
+            anchors = _extract_anchors(effective_question)
+            if anchors:
+                yield {"type": "thinking", "content": f"🔍 质量检查中（锚点：{'、'.join(anchors)}）..."}
+                reflection = await reflect_on_insights(
+                    effective_question, anchors, insights, rows, knowledge
+                )
+                if reflection.get("has_gaps") and reflection.get("anchors_missing"):
+                    missing_desc = reflection.get("gap_description", "部分维度未覆盖")
+                    yield {"type": "thinking", "content": f"⚠ 洞察缺失：{missing_desc}，正在补充..."}
+                    patch = await patch_insights(
+                        effective_question,
+                        reflection["anchors_missing"],
+                        reflection.get("gap_description", ""),
+                        insights,
+                        rows,
+                        knowledge,
+                    )
+                    if patch:
+                        insights = insights + patch  # ← APPEND, never rewrite!
+                        reflection_applied = True
+                        yield {"type": "thinking", "content": f"✅ 已补充 {len(patch)} 条洞察：{patch[0][:60]}..."}
+                else:
+                    yield {"type": "thinking", "content": "✅ 洞察质量检查通过，所有锚点已覆盖"}
+        except Exception:
+            # Graceful degradation: if reflection fails, original insights
+            # pass through unchanged. The user sees the unmodified output.
+            pass
+
     plan_steps = build_plan_steps(
         intent=intent_result,
         answer_type="data_analysis",
@@ -924,6 +1164,7 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         "answer_type": "data_analysis",
         "context_applied": context_applied,
         "effective_question": effective_question,
+        "reflection_applied": reflection_applied,
     }
     _store_assistant(session_id, payload, "analyze", dataset_id)
     yield {"type": "result", "data": payload}

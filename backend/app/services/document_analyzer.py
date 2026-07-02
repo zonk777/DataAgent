@@ -16,6 +16,304 @@ from .intent_classifier import IntentResult
 MAX_DIRECT_CHARS = 12000
 CHUNK_CHARS = 5500
 MAX_CHUNKS = 10
+ALLOWED_DOCUMENT_CHART_TYPES = {"bar", "line", "pie", "scatter", "area", "radar"}
+MAX_DOCUMENT_CHART_ROWS = 40
+MAX_DOCUMENT_CHART_SECTIONS = 6
+
+
+def _coerce_chart_value(value: Any) -> str | float | int | None:
+    """Normalize values returned by the LLM so ECharts can draw them reliably."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return round(value, 4)
+
+    text = str(value).strip()
+    if not text:
+        return ""
+
+    compact = text.replace(",", "").replace("，", "")
+    match = re.search(r"-?\d+(?:\.\d+)?", compact)
+    has_numeric_unit = any(unit in compact for unit in ("%", "％", "元", "万", "亿", "条", "个", "户", "倍", "页"))
+    if match and (has_numeric_unit or re.fullmatch(r"\s*-?\d+(?:\.\d+)?\s*", compact)):
+        number = float(match.group(0))
+        return int(number) if number.is_integer() else round(number, 4)
+    return text[:160]
+
+
+def _columns_from_rows(rows: list[dict[str, Any]]) -> list[str]:
+    columns: list[str] = []
+    for row in rows:
+        for key in row.keys():
+            if key not in columns:
+                columns.append(key)
+    return columns
+
+
+def _is_numeric(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    try:
+        float(str(value).replace(",", ""))
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _guess_x_field(rows: list[dict[str, Any]], columns: list[str]) -> str:
+    for column in columns:
+        values = [row.get(column) for row in rows]
+        if any(value not in (None, "") and not _is_numeric(value) for value in values):
+            return column
+    return columns[0] if columns else ""
+
+
+def _guess_y_field(rows: list[dict[str, Any]], columns: list[str], x_field: str) -> str:
+    for column in columns:
+        if column == x_field:
+            continue
+        values = [row.get(column) for row in rows]
+        if any(_is_numeric(value) for value in values):
+            return column
+    return next((column for column in columns if column != x_field), "")
+
+
+def _empty_document_chart(title: str) -> dict[str, Any]:
+    return {
+        "type": "none",
+        "title": f"{title} - 文档分析",
+        "x_field": "",
+        "y_field": "",
+        "series_name": "",
+        "series_field": None,
+        "series_fields": [],
+    }
+
+
+def _clean_metric_label(prefix: str) -> str:
+    prefix = prefix.replace("\n", " ")
+    parts = [part.strip() for part in re.split(r"[。；;，,、]", prefix) if part.strip()]
+    label = parts[-1] if parts else prefix
+    label = label.strip(" ：:（）()[]【】+-=~约达为")
+    label = re.sub(r"^(且|其中|同时|但|而|并|以及|另外|此外)", "", label)
+    label = re.sub(r"(均)?(超过|高达|达到|达|为|是|升至|增至|约|约为|占比|占)$", "", label)
+    label = label.strip(" ：:（）()[]【】+-=~约达为")
+    if "（" in label and not label.endswith("）"):
+        before, after = label.rsplit("（", 1)
+        label = after if len(after) >= 2 else before
+    if "(" in label and not label.endswith(")"):
+        before, after = label.rsplit("(", 1)
+        label = after if len(after) >= 2 else before
+    label = re.sub(r"\s+", "", label)
+    label = re.sub(r"^[\d.]+$", "", label)
+    return label[-18:] if len(label) > 18 else label
+
+
+def _fallback_chart_from_insights(title: str, insights: list[str]) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
+    """Build a small chart from numeric facts in model-generated insights."""
+    rows: list[dict[str, Any]] = []
+    pattern = re.compile(r"(-?\d+(?:\.\d+)?)\s*(%|％|亿元|万元|元|亿|万|条|个|户|倍)")
+    for insight in insights:
+        for match in pattern.finditer(insight):
+            raw_value, unit = match.groups()
+            prefix = insight[max(0, match.start() - 42):match.start()]
+            label = _clean_metric_label(prefix)
+            try:
+                value = float(raw_value)
+            except ValueError:
+                continue
+            if not label or any(row["指标"] == label for row in rows):
+                continue
+            rows.append({"指标": label, "数值": int(value) if value.is_integer() else round(value, 4), "单位": unit})
+            if len(rows) >= 12:
+                break
+        if len(rows) >= 12:
+            break
+
+    if len(rows) < 2:
+        return [], [], _empty_document_chart(title)
+
+    return (
+        ["指标", "数值", "单位"],
+        rows,
+        {
+            "type": "bar",
+            "title": f"{title} - 关键指标提取",
+            "x_field": "指标",
+            "y_field": "数值",
+            "series_name": "数值",
+            "series_field": None,
+            "series_fields": [],
+            "recommendation": {
+                "type": "bar",
+                "source": "document-insight-extraction",
+                "reason": "从 DeepSeek 生成的文档结论中提取可量化指标用于直观对比。",
+                "confidence": 0.62,
+            },
+        },
+    )
+
+
+def _chart_payload_from_chart(
+    chart: dict[str, Any],
+    title: str,
+    insights: list[str],
+    *,
+    source: str = "document-llm",
+    confidence: float = 0.78,
+) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
+    raw_rows = chart.get("rows") if isinstance(chart.get("rows"), list) else []
+    rows: list[dict[str, Any]] = []
+    for raw_row in raw_rows[:MAX_DOCUMENT_CHART_ROWS]:
+        if not isinstance(raw_row, dict):
+            continue
+        row: dict[str, Any] = {}
+        for key, value in raw_row.items():
+            column = str(key).strip()
+            normalized = _coerce_chart_value(value)
+            if column and normalized not in (None, ""):
+                row[column] = normalized
+        if row:
+            rows.append(row)
+
+    if not rows:
+        return _fallback_chart_from_insights(title, insights)
+
+    columns = _columns_from_rows(rows)
+    x_field = str(chart.get("x_field") or chart.get("x") or "").strip()
+    y_field = str(chart.get("y_field") or chart.get("y") or "").strip()
+    if x_field not in columns:
+        x_field = _guess_x_field(rows, columns)
+    if y_field not in columns:
+        y_field = _guess_y_field(rows, columns, x_field)
+    if not x_field or not y_field:
+        return _fallback_chart_from_insights(title, insights)
+
+    chart_type = str(chart.get("type") or "bar").lower()
+    if chart_type not in ALLOWED_DOCUMENT_CHART_TYPES:
+        chart_type = "bar"
+    series_field = chart.get("series_field")
+    series_field = str(series_field).strip() if series_field else None
+    if series_field not in columns:
+        series_field = None
+    series_fields = chart.get("series_fields") if isinstance(chart.get("series_fields"), list) else []
+    series_fields = [str(field).strip() for field in series_fields if str(field).strip() in columns]
+    if series_field and not series_fields:
+        series_fields = [series_field]
+
+    chart_title = str(chart.get("title") or f"{title} - 关键指标图表").strip()
+    return (
+        columns,
+        rows,
+        {
+            "type": chart_type,
+            "title": chart_title,
+            "x_field": x_field,
+            "y_field": y_field,
+            "series_name": str(chart.get("series_name") or y_field),
+            "series_field": series_field,
+            "series_fields": series_fields,
+            "recommendation": {
+                "type": chart_type,
+                "source": source,
+                "reason": "DeepSeek 从上传文档中抽取了可量化字段，并推荐用于图表展示。",
+                "confidence": confidence,
+            },
+        },
+    )
+
+
+def _chart_payload_from_llm_result(
+    result: dict[str, Any],
+    title: str,
+    insights: list[str],
+) -> tuple[list[str], list[dict[str, Any]], dict[str, Any]]:
+    chart = result.get("chart") if isinstance(result.get("chart"), dict) else {}
+    return _chart_payload_from_chart(chart, title, insights)
+
+
+def _section_payload(
+    *,
+    section_id: str,
+    title: str,
+    description: str,
+    columns: list[str],
+    rows: list[dict[str, Any]],
+    chart: dict[str, Any],
+    insights: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": section_id,
+        "title": title,
+        "description": description,
+        "columns": columns,
+        "rows": rows,
+        "chart": chart,
+        "insights": insights or [],
+    }
+
+
+def _chart_sections_from_llm_result(
+    result: dict[str, Any],
+    title: str,
+    insights: list[str],
+) -> list[dict[str, Any]]:
+    raw_sections = result.get("chart_sections") if isinstance(result.get("chart_sections"), list) else []
+    sections: list[dict[str, Any]] = []
+    for index, raw in enumerate(raw_sections[:MAX_DOCUMENT_CHART_SECTIONS], 1):
+        if not isinstance(raw, dict):
+            continue
+        section_title = str(raw.get("title") or f"{title} - 图表 {index}").strip()
+        section_insights = [
+            str(item).strip()
+            for item in (raw.get("insights") if isinstance(raw.get("insights"), list) else [])
+            if str(item).strip()
+        ]
+        chart = raw.get("chart") if isinstance(raw.get("chart"), dict) else raw
+        columns, rows, chart_spec = _chart_payload_from_chart(
+            chart,
+            section_title,
+            section_insights or insights,
+            source="document-llm-section",
+            confidence=0.82,
+        )
+        if not rows or chart_spec.get("type") == "none":
+            continue
+        sections.append(
+            _section_payload(
+                section_id=str(raw.get("id") or f"doc-section-{index}"),
+                title=section_title,
+                description=str(raw.get("description") or raw.get("summary") or "").strip(),
+                columns=columns,
+                rows=rows,
+                chart=chart_spec,
+                insights=section_insights,
+            )
+        )
+
+    if sections:
+        return sections
+
+    columns, rows, chart_spec = _chart_payload_from_llm_result(result, title, insights)
+    if rows and chart_spec.get("type") != "none":
+        return [
+            _section_payload(
+                section_id="doc-section-primary",
+                title=chart_spec.get("title") or f"{title} - 关键指标",
+                description="文档中抽取的核心可视化指标。",
+                columns=columns,
+                rows=rows,
+                chart=chart_spec,
+                insights=insights[:2],
+            )
+        ]
+    return []
 
 
 def wants_database_context(question: str) -> bool:
@@ -250,6 +548,34 @@ async def analyze_uploaded_document(
                 "所有结论必须来自文件内容，不确定处要说明“文件中未明确给出”。"
             ),
         },
+        {
+            "role": "system",
+            "content": (
+                "请在 JSON 中额外返回 chart 对象，用于前端直接画图。"
+                "chart 结构必须为："
+                "{\"type\":\"bar|line|pie|scatter|area|radar|none\",\"title\":\"图表标题\","
+                "\"x_field\":\"维度字段\",\"y_field\":\"数值字段\",\"series_field\":null,"
+                "\"series_name\":\"系列名称\",\"rows\":[{\"维度字段\":\"指标名\",\"数值字段\":123.45}]}。"
+                "如果文档中有营收、利润、增长率、占比、客户数、现金流、资产等可量化指标，优先抽取 3-12 条做图；"
+                "百分比只填数字，例如 45.88，不要填 '45.88%'；金额可保留原单位对应的数字，例如亿元填 6.39。"
+                "如果没有任何可视化价值的数据，chart.type 填 none 且 rows 为空。"
+            ),
+        },
+        {
+            "role": "system",
+            "content": (
+                "如果用户要求“完整分析、全面分析、多维度分析、分析报告、经营报告、财务报告”等，"
+                "请额外返回 chart_sections 数组，表示多组图表。每个 section 结构为："
+                "{\"id\":\"唯一ID\",\"title\":\"维度名称\",\"description\":\"该图说明\","
+                "\"insights\":[\"该图对应的一句话洞察\"],"
+                "\"chart\":{\"type\":\"bar|line|pie|scatter|area|radar|none\",\"title\":\"图表标题\","
+                "\"x_field\":\"维度字段\",\"y_field\":\"数值字段\",\"series_field\":null,"
+                "\"series_name\":\"系列名称\",\"rows\":[{\"维度字段\":\"指标名\",\"数值字段\":123.45}]}}。"
+                "尽量生成 3-6 个 section，例如：增长指标、收入结构、客户集中度、现金流、资产负债、研发投入。"
+                "每个 section 只放同一量纲或同一主题的数据；如果单位不同，可以拆成不同 section。"
+                "仍然要保留顶层 chart，用最重要的一组图作为默认展示。"
+            ),
+        },
         *recent_history,
         {
             "role": "user",
@@ -261,6 +587,11 @@ async def analyze_uploaded_document(
                     "user_question": effective_question,
                     "document_notes": notes[:28000],
                     "truncated_notice": truncated_notice,
+                    "visualization_instruction": (
+                        "请根据文档里的数字字段生成 chart.rows。每行必须是扁平 JSON 对象，"
+                        "至少包含一个维度字段和一个数值字段，数值字段必须是 number 类型。"
+                        "如果是完整/多维分析，请把不同主题分别放入 chart_sections，每组都带 chart.rows。"
+                    ),
                 },
                 ensure_ascii=False,
             ),
@@ -291,6 +622,15 @@ async def analyze_uploaded_document(
         summary = "文件已解析，但模型没有生成有效结论。请换一种更具体的问题重新分析。"
         insights = [summary]
 
+    chart_sections = _chart_sections_from_llm_result(result, title, insights)
+    if chart_sections:
+        primary_section = chart_sections[0]
+        columns = primary_section["columns"]
+        chart_rows = primary_section["rows"]
+        chart_spec = primary_section["chart"]
+    else:
+        columns, chart_rows, chart_spec = _chart_payload_from_llm_result(result, title, insights)
+
     intent_label = "report_generation" if any(key in effective_question for key in ("报告", "总结", "分析")) else "knowledge_qa"
     intent = IntentResult(intent_label, 0.9, "file_router", "上传文件触发文件专用分析")
     plan_steps = build_plan_steps(
@@ -298,9 +638,9 @@ async def analyze_uploaded_document(
         answer_type="knowledge_qa",
         execution_mode="document-llm",
         dataset_name=title,
-        chart_type="none",
+        chart_type=chart_spec.get("type") or "none",
     )
-    plan = ["解析上传文件", f"读取文件内容（{source_mode}）", "围绕用户问题生成文件分析结论"]
+    plan = ["解析上传文件", f"读取文件内容（{source_mode}）", "抽取可视化指标并生成图表", "围绕用户问题生成文件分析结论"]
     return {
         "session_id": session_id,
         "message": summary,
@@ -313,17 +653,10 @@ async def analyze_uploaded_document(
         "plan": plan,
         "plan_steps": plan_steps,
         "sql": "",
-        "columns": [],
-        "rows": [],
-        "chart": {
-            "type": "none",
-            "title": f"{title} - 文件分析",
-            "x_field": "",
-            "y_field": "",
-            "series_name": "",
-            "series_field": None,
-            "series_fields": [],
-        },
+        "columns": columns,
+        "rows": chart_rows,
+        "chart": chart_spec,
+        "chart_sections": chart_sections,
         "insights": insights,
         "knowledge_refs": [
             {

@@ -118,6 +118,16 @@ class ChartSpec(BaseModel):
     facet_fields: list[str] = Field(default_factory=list)
 
 
+class ChartSectionSpec(BaseModel):
+    id: str
+    title: str
+    description: str = ""
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+    chart: ChartSpec
+    insights: list[str] = Field(default_factory=list)
+
+
 class PlanStepSpec(BaseModel):
     id: int
     title: str
@@ -142,6 +152,7 @@ class AnalysisResponse(BaseModel):
     columns: list[str]
     rows: list[dict[str, Any]]
     chart: ChartSpec
+    chart_sections: list[ChartSectionSpec] = Field(default_factory=list)
     insights: list[str]
     knowledge_refs: list[dict[str, Any]]
     execution_mode: str

@@ -80,36 +80,45 @@ def _safe_text(value: Any) -> str:
     return str(value)
 
 
+def _h(value: Any) -> str:
+    return html.escape(_safe_text(value))
+
+
 def _report_title(data: ReportData) -> str:
     return _safe_text(data.payload.get("chart", {}).get("title") or data.session.get("title") or "数据智能体分析报告")
 
 
 def build_html_report(data: ReportData) -> str:
     payload = data.payload
-    insights = "".join(f"<li>{html.escape(str(item))}</li>" for item in payload.get("insights", []))
+    insights = "".join(f"<li>{_h(item)}</li>" for item in payload.get("insights", []))
     references = "".join(
-        f"<li><strong>{html.escape(str(item.get('title', '')))}</strong>：{html.escape(str(item.get('content', '')))}</li>"
+        f"<li><strong>{_h(item.get('title', ''))}</strong>：{_h(item.get('content', ''))}</li>"
         for item in payload.get("knowledge_refs", [])
     )
     table = ""
     if payload.get("rows"):
         columns = payload.get("columns", [])
-        table_head = "".join(f"<th>{html.escape(str(column))}</th>" for column in columns)
+        table_head = "".join(f"<th>{_h(column)}</th>" for column in columns)
         table_rows = "".join(
-            "<tr>" + "".join(f"<td>{html.escape(str(item.get(column, '')))}</td>" for column in columns) + "</tr>"
+            "<tr>" + "".join(f"<td>{_h(item.get(column, ''))}</td>" for column in columns) + "</tr>"
             for item in payload["rows"]
         )
         table = f"<h2>查询结果</h2><table><thead><tr>{table_head}</tr></thead><tbody>{table_rows}</tbody></table>"
-    sql = f"<h2>执行 SQL</h2><pre>{html.escape(payload['sql'])}</pre>" if payload.get("sql") else ""
+    sql = f"<h2>执行 SQL</h2><pre>{_h(payload['sql'])}</pre>" if payload.get("sql") else ""
     refs = f"<h2>知识依据</h2><ul>{references}</ul>" if references else ""
     return f"""<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>数据智能体分析报告</title>
-    <style>body{{font-family:Arial,'Microsoft YaHei',sans-serif;max-width:980px;margin:48px auto;color:#16324f;line-height:1.7}}
-    h1{{color:#087ea4}} .meta{{color:#667085}} table{{width:100%;border-collapse:collapse;margin:24px 0}}
-    th,td{{padding:10px 12px;border:1px solid #dbe5ee;text-align:left}} th{{background:#edf8fc}} pre{{background:#f4f7fa;padding:16px;white-space:pre-wrap}}</style></head>
-    <body><h1>{html.escape(_report_title(data))}</h1>
-    <p class="meta">会话编号：{html.escape(data.session["id"])} · 类型：{html.escape(payload.get("intent", ""))} · 生成时间：{html.escape(data.assistant_message.get("created_at", ""))}</p>
-    <p><strong>分析问题：</strong>{html.escape(data.question)}</p>
-    <h2>回答与发现</h2><ul>{insights}</ul>{table}{sql}{refs}</body></html>"""
+    <style>
+    body{{font-family:Arial,'Microsoft YaHei',sans-serif;max-width:1080px;margin:0 auto;padding:46px 34px;color:#16324f;line-height:1.75;background:linear-gradient(135deg,#f5fbff,#eef8fb)}}
+    .report{{background:rgba(255,255,255,.92);border:1px solid #dbe9f2;border-radius:24px;padding:34px 38px;box-shadow:0 24px 60px rgba(38,80,116,.12)}}
+    h1{{color:#0b3150;margin:0 0 10px;font-size:30px}} h2{{color:#087ea4;margin-top:28px;border-left:4px solid #19b9c6;padding-left:10px}}
+    .meta{{color:#667085;background:#f2f8fc;border-radius:14px;padding:10px 14px}} table{{width:100%;border-collapse:collapse;margin:24px 0;background:white}}
+    th,td{{padding:10px 12px;border:1px solid #dbe5ee;text-align:left}} th{{background:#edf8fc;color:#31516a}} pre{{background:#102b40;color:#d9f3f1;border-radius:14px;padding:16px;white-space:pre-wrap;overflow:auto}}
+    li{{margin:8px 0}}
+    </style></head>
+    <body><main class="report"><h1>{_h(_report_title(data))}</h1>
+    <p class="meta">会话编号：{_h(data.session.get("id", ""))} · 类型：{_h(payload.get("intent", ""))} · 生成时间：{_h(data.assistant_message.get("created_at", ""))}</p>
+    <p><strong>分析问题：</strong>{_h(data.question)}</p>
+    <h2>回答与发现</h2><ul>{insights}</ul>{table}{sql}{refs}</main></body></html>"""
 
 
 def build_markdown_report(data: ReportData) -> bytes:
@@ -119,17 +128,17 @@ def build_markdown_report(data: ReportData) -> bytes:
         "",
         "## 报告概况",
         "",
-        f"- 会话编号：{data.session['id']}",
-        f"- 分析问题：{data.question}",
-        f"- 分析类型：{payload.get('intent', '')}",
-        f"- 执行模式：{payload.get('execution_mode', '')}",
-        f"- 生成时间：{data.assistant_message.get('created_at', '')}",
+        f"- 会话编号：{_safe_text(data.session.get('id', ''))}",
+        f"- 分析问题：{_safe_text(data.question)}",
+        f"- 分析类型：{_safe_text(payload.get('intent', ''))}",
+        f"- 执行模式：{_safe_text(payload.get('execution_mode', ''))}",
+        f"- 生成时间：{_safe_text(data.assistant_message.get('created_at', ''))}",
         "",
         "## 回答与关键发现",
         "",
     ]
     for idx, insight in enumerate(payload.get("insights") or [], 1):
-        lines.append(f"{idx}. {insight}")
+        lines.append(f"{idx}. {_safe_text(insight)}")
     if payload.get("rows"):
         columns = payload.get("columns", [])
         lines.extend(["", "## 查询结果", "", "| " + " | ".join(map(str, columns)) + " |"])
@@ -139,11 +148,11 @@ def build_markdown_report(data: ReportData) -> bytes:
         if len(payload.get("rows", [])) > 120:
             lines.append(f"\n> 结果共 {len(payload.get('rows', []))} 行，Markdown 仅展示前 120 行。")
     if payload.get("sql"):
-        lines.extend(["", "## 执行 SQL", "", "```sql", payload["sql"], "```"])
+        lines.extend(["", "## 执行 SQL", "", "```sql", _safe_text(payload["sql"]), "```"])
     if payload.get("knowledge_refs"):
         lines.extend(["", "## 知识依据", ""])
         for item in payload["knowledge_refs"]:
-            lines.append(f"- **{item.get('title', '')}**（{item.get('category', '')}）：{item.get('content', '')}")
+            lines.append(f"- **{_safe_text(item.get('title', ''))}**（{_safe_text(item.get('category', ''))}）：{_safe_text(item.get('content', ''))}")
     return "\n".join(lines).encode("utf-8")
 
 
@@ -309,7 +318,7 @@ def _set_run_font(run, size: int | None = None, bold: bool | None = None, color:
 def _add_docx_paragraph(doc: Document, text: str, size: int = 10, bold: bool = False) -> None:
     p = doc.add_paragraph()
     p.paragraph_format.space_after = Pt(5)
-    run = p.add_run(text)
+    run = p.add_run(_safe_text(text))
     _set_run_font(run, size=size, bold=bold)
 
 
@@ -429,10 +438,17 @@ def _p(text: Any, style: ParagraphStyle) -> Paragraph:
     return Paragraph(html.escape(_safe_text(text)).replace("\n", "<br/>"), style)
 
 
+def _pdf_cell_text(value: Any, max_chars: int = 520) -> str:
+    text = _safe_text(value).strip()
+    if len(text) > max_chars:
+        return text[:max_chars].rstrip() + "……"
+    return text
+
+
 def _pdf_table(headers: list[str], rows: list[list[Any]], styles: dict[str, ParagraphStyle], max_rows: int = 80) -> Table:
     data = [[_p(header, styles["small"]) for header in headers]]
     for row in rows[:max_rows]:
-        data.append([_p(value, styles["small"]) for value in row])
+        data.append([_p(_pdf_cell_text(value), styles["small"]) for value in row])
     table = LongTable(data, repeatRows=1)
     table.setStyle(
         TableStyle(
@@ -493,7 +509,7 @@ def build_pdf_report(data: ReportData) -> bytes:
         columns = payload.get("columns", [])
         story.append(_pdf_table(columns, [[row.get(column, "") for column in columns] for row in payload.get("rows", [])], styles))
     if payload.get("sql"):
-        story.extend([Spacer(1, 8), Paragraph("五、执行 SQL", styles["h1"]), Paragraph(payload["sql"], styles["small"])])
+        story.extend([Spacer(1, 8), Paragraph("五、执行 SQL", styles["h1"]), _p(payload["sql"], styles["small"])])
     if payload.get("knowledge_refs"):
         story.extend([Spacer(1, 8), Paragraph("六、知识依据", styles["h1"])])
         story.append(

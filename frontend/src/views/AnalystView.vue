@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import AppIcon from '../components/AppIcon.vue'
 import ResultChart from '../components/ResultChart.vue'
 import ThinkingBlock from '../components/ThinkingBlock.vue'
@@ -34,6 +34,7 @@ const question = ref('')
 const showSql = ref(false)
 const fileInput = ref<HTMLInputElement | null>(null)
 const chosenFile = ref<File | null>(null)
+const selectedChartSectionIndex = ref(0)
 
 function chooseFile(e: Event) {
   chosenFile.value = (e.target as HTMLInputElement).files?.[0] || null
@@ -60,6 +61,78 @@ function submitInput() {
 function isLatestMessage(index: number) {
   return index === props.chatMessages.length - 1
 }
+
+function isDocumentResult(result: AnalysisResult) {
+  return result.execution_mode === 'document-llm' || result.execution_mode === 'local-document-parser'
+}
+
+function resultEyebrow(result: AnalysisResult) {
+  if (isDocumentResult(result)) return 'DOCUMENT INSIGHT'
+  return result.answer_type === 'knowledge_qa' ? 'KNOWLEDGE ANSWER' : 'ANALYSIS REPORT'
+}
+
+function insightTitle(result: AnalysisResult) {
+  if (isDocumentResult(result)) return '文档分析结论'
+  return result.answer_type === 'knowledge_qa' ? '知识库回答' : '关键发现'
+}
+
+function resultCountLabel(result: AnalysisResult) {
+  if (isDocumentResult(result) && result.rows.length) return `${result.rows.length} 条可视化指标`
+  return result.answer_type === 'knowledge_qa' ? `${result.knowledge_refs.length} 条知识依据` : `${result.rows.length} 条结果`
+}
+
+function tableTitle(result: AnalysisResult) {
+  return isDocumentResult(result) ? '图表数据' : '查询结果'
+}
+
+const chartSections = computed(() => {
+  const current = props.result
+  if (!current) return []
+  const sections = (current.chart_sections || []).filter((section) =>
+    section.chart?.type !== 'none' && section.rows?.length && section.columns?.length,
+  )
+  if (sections.length) return sections
+  if (current.chart.type !== 'none' && current.rows.length) {
+    return [{
+      id: 'primary',
+      title: current.chart.title,
+      description: '当前分析结果的默认图表。',
+      columns: current.columns,
+      rows: current.rows,
+      chart: current.chart,
+      insights: [],
+    }]
+  }
+  return []
+})
+
+const activeChartSection = computed(() => {
+  const sections = chartSections.value
+  if (!sections.length) return null
+  const index = Math.min(selectedChartSectionIndex.value, sections.length - 1)
+  return sections[index]
+})
+
+const activeChartResult = computed<AnalysisResult | null>(() => {
+  if (!props.result) return null
+  const section = activeChartSection.value
+  if (!section) return props.result
+  return {
+    ...props.result,
+    columns: section.columns,
+    rows: section.rows,
+    chart: section.chart,
+  }
+})
+
+watch(() => props.result?.session_id, () => {
+  selectedChartSectionIndex.value = 0
+  showSql.value = false
+})
+
+watch(() => chartSections.value.length, (length) => {
+  if (selectedChartSectionIndex.value >= length) selectedChartSectionIndex.value = 0
+})
 </script>
 
 <template>
@@ -127,14 +200,54 @@ function isLatestMessage(index: number) {
         </div>
         <div v-if="!result" class="empty-result"><div><AppIcon name="chart" :size="34" /></div><h3>分析结果将在这里呈现</h3><p>选择一个示例问题，或在左侧输入你的业务问题。</p></div>
         <template v-else>
-          <div class="report-header"><div><small>{{ result.answer_type === 'knowledge_qa' ? 'KNOWLEDGE ANSWER' : 'ANALYSIS REPORT' }}</small><h2>{{ result.chart.title }}</h2></div><a :href="api.reportUrl(result.session_id)" target="_blank"><AppIcon name="file" :size="17" />导出报告</a></div>
-          <div class="result-meta"><span>{{ result.intent }}</span><span>{{ result.execution_mode }}</span><span>{{ result.answer_type === 'knowledge_qa' ? `${result.knowledge_refs.length} 条知识依据` : `${result.rows.length} 条结果` }}</span><span v-if="result.context_applied">已使用对话上下文</span></div>
-          <div v-if="result.chart.type !== 'none'" class="chart-card"><ResultChart :result="result" /></div>
-          <div class="insight-card"><h3><AppIcon name="spark" :size="19" />{{ result.answer_type === 'knowledge_qa' ? '知识库回答' : '关键发现' }}</h3><div v-for="(insight, index) in result.insights" :key="insight"><span>{{ index + 1 }}</span><p class="answer-text">{{ insight }}</p></div></div>
+          <div class="report-header">
+            <div>
+              <small>{{ resultEyebrow(result) }}</small>
+              <h2>{{ result.chart.title }}</h2>
+            </div>
+            <div class="export-actions" aria-label="导出报告">
+              <a class="export-primary" :href="api.reportUrl(result.session_id, 'html')" target="_blank">
+                <AppIcon name="eye" :size="16" />
+                <span>预览报告</span>
+              </a>
+              <a :href="api.reportUrl(result.session_id, 'pdf')" target="_blank" title="导出 PDF">
+                PDF
+              </a>
+              <a :href="api.reportUrl(result.session_id, 'docx')" target="_blank" title="导出 Word">
+                Word
+              </a>
+              <a :href="api.reportUrl(result.session_id, 'md')" target="_blank" title="导出 Markdown">
+                MD
+              </a>
+            </div>
+          </div>
+          <div class="result-meta"><span>{{ result.intent }}</span><span>{{ result.execution_mode }}</span><span>{{ resultCountLabel(result) }}</span><span v-if="chartSections.length > 1">{{ chartSections.length }} 组图表</span><span v-if="result.context_applied">已使用对话上下文</span></div>
+          <div v-if="activeChartResult && activeChartResult.chart.type !== 'none'" class="chart-card multi-chart-card">
+            <div v-if="chartSections.length > 1" class="chart-section-switch">
+              <div>
+                <small>CHART SECTIONS</small>
+                <strong>切换图表内容</strong>
+              </div>
+              <div class="chart-section-tabs">
+                <button
+                  v-for="(section, index) in chartSections"
+                  :key="section.id || index"
+                  :class="{ active: selectedChartSectionIndex === index }"
+                  type="button"
+                  @click="selectedChartSectionIndex = index"
+                >
+                  {{ section.title || `图表 ${index + 1}` }}
+                </button>
+              </div>
+            </div>
+            <div v-if="activeChartSection?.description" class="chart-section-note">{{ activeChartSection.description }}</div>
+            <ResultChart :result="activeChartResult" />
+          </div>
+          <div class="insight-card"><h3><AppIcon name="spark" :size="19" />{{ insightTitle(result) }}</h3><div v-for="(insight, index) in result.insights" :key="insight"><span>{{ index + 1 }}</span><p class="answer-text">{{ insight }}</p></div></div>
           <div v-if="result.knowledge_refs.length" class="knowledge-sources"><h3><AppIcon name="book" :size="18"/>知识依据</h3><article v-for="item in result.knowledge_refs" :key="item.id"><div><strong>{{ item.title }}</strong><em>{{ item.retrieval_mode || item.category }}<template v-if="item.score"> · {{ item.score.toFixed(3) }}</template></em></div><p>{{ item.content }}</p></article></div>
-          <div v-if="result.rows.length" class="data-table-card"><div class="subhead"><h3>查询结果</h3><button @click="showSql = !showSql">{{ showSql ? '隐藏 SQL' : '查看 SQL' }}</button></div>
-            <pre v-if="showSql" class="sql-block">{{ result.sql }}</pre>
-            <div class="table-scroll"><table><thead><tr><th v-for="column in result.columns" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, index) in result.rows" :key="index"><td v-for="column in result.columns" :key="column">{{ row[column] }}</td></tr></tbody></table></div>
+          <div v-if="activeChartResult?.rows.length" class="data-table-card"><div class="subhead"><h3>{{ tableTitle(result) }}</h3><button v-if="result.sql" @click="showSql = !showSql">{{ showSql ? '隐藏 SQL' : '查看 SQL' }}</button></div>
+            <pre v-if="showSql && result.sql" class="sql-block">{{ result.sql }}</pre>
+            <div class="table-scroll"><table><thead><tr><th v-for="column in activeChartResult.columns" :key="column">{{ column }}</th></tr></thead><tbody><tr v-for="(row, index) in activeChartResult.rows" :key="index"><td v-for="column in activeChartResult.columns" :key="column">{{ row[column] }}</td></tr></tbody></table></div>
           </div>
         </template>
       </div>
@@ -282,16 +395,51 @@ function isLatestMessage(index: number) {
   box-shadow: 0 18px 44px rgba(42, 80, 110, 0.08);
 }
 
-.report-header a {
-  text-decoration: none;
-  color: white;
-  background: linear-gradient(135deg, #177cff, #19b9c6);
-  padding: 11px 15px;
-  border-radius: 13px;
+.export-actions {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  padding: 6px;
+  border: 1px solid rgba(207, 227, 239, 0.92);
+  border-radius: 18px;
+  background: linear-gradient(135deg, rgba(247, 252, 255, 0.92), rgba(235, 248, 251, 0.92));
+  box-shadow: inset 0 1px 0 rgba(255,255,255,.92), 0 12px 28px rgba(44, 85, 115, 0.08);
+}
+
+.export-actions a {
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 12px;
+  border-radius: 12px;
+  color: #47708a;
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(215, 230, 239, 0.95);
+  font-size: 10px;
+  font-weight: 800;
+  transition: transform .16s ease, box-shadow .16s ease, color .16s ease, background .16s ease;
+}
+
+.export-actions a:hover {
+  transform: translateY(-1px);
+  color: #0e79b9;
+  box-shadow: 0 10px 22px rgba(35, 103, 153, 0.14);
+}
+
+.export-actions .export-primary {
+  gap: 8px;
+  color: white;
+  background: linear-gradient(135deg, #177cff, #19b9c6);
+  border: 0;
+  padding: 0 15px;
   box-shadow: 0 12px 24px rgba(24, 132, 219, 0.25);
+}
+
+.export-actions .export-primary:hover {
+  color: white;
+  box-shadow: 0 16px 30px rgba(24, 132, 219, 0.32);
 }
 
 .chart-card,
@@ -303,6 +451,77 @@ function isLatestMessage(index: number) {
   background: rgba(255, 255, 255, 0.86);
   box-shadow: 0 22px 52px rgba(45, 82, 112, 0.08);
   backdrop-filter: blur(14px);
+}
+
+.multi-chart-card {
+  display: grid;
+  gap: 14px;
+}
+
+.chart-section-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px;
+  border-radius: 18px;
+  background:
+    linear-gradient(135deg, rgba(235, 246, 255, 0.9), rgba(231, 252, 248, 0.82));
+  border: 1px solid rgba(204, 225, 238, 0.78);
+}
+
+.chart-section-switch small {
+  display: block;
+  color: #65a7bb;
+  font-size: 9px;
+  font-weight: 900;
+  letter-spacing: .16em;
+}
+
+.chart-section-switch strong {
+  display: block;
+  color: #173a55;
+  font-size: 13px;
+  margin-top: 3px;
+}
+
+.chart-section-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.chart-section-tabs button {
+  border: 1px solid rgba(202, 222, 235, 0.94);
+  border-radius: 999px;
+  padding: 8px 12px;
+  color: #536e82;
+  background: rgba(255, 255, 255, 0.82);
+  font-size: 10px;
+  font-weight: 800;
+  cursor: pointer;
+  transition: transform .16s ease, box-shadow .16s ease, color .16s ease, background .16s ease;
+}
+
+.chart-section-tabs button:hover {
+  transform: translateY(-1px);
+  color: #1576d9;
+  box-shadow: 0 10px 22px rgba(39, 104, 150, 0.12);
+}
+
+.chart-section-tabs button.active {
+  color: white;
+  border-color: transparent;
+  background: linear-gradient(135deg, #177cff, #19b9c6);
+  box-shadow: 0 12px 24px rgba(24, 132, 219, 0.24);
+}
+
+.chart-section-note {
+  color: #60778a;
+  font-size: 11px;
+  line-height: 1.7;
+  padding: 0 4px;
 }
 
 .insight-card > div {

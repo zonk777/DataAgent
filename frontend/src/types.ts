@@ -66,6 +66,43 @@ export interface KnowledgeItem {
   retrieval_mode?: string
 }
 
+export type ChartType = 'bar' | 'line' | 'pie' | 'scatter' | 'area' | 'radar' | 'none'
+
+export interface ChartSpec {
+  type: ChartType
+  title: string
+  x_field: string | null
+  y_field: string | null
+  series_name: string | null
+  series_field: string | null
+  series_fields?: string[]
+  recommendation?: {
+    type: ChartType
+    source: string
+    reason: string
+    confidence?: number
+    alternatives?: string[]
+    display_mode?: 'single' | 'dual_axis' | 'facet'
+    secondary_y_field?: string | null
+    facet_fields?: string[]
+    distribution?: Record<string, unknown>
+  } | null
+  alternatives?: Array<Exclude<ChartType, 'none'>>
+  display_mode?: 'single' | 'dual_axis' | 'facet'
+  secondary_y_field?: string | null
+  facet_fields?: string[]
+}
+
+export interface ChartSection {
+  id: string
+  title: string
+  description: string
+  columns: string[]
+  rows: Record<string, string | number | null>[]
+  chart: ChartSpec
+  insights?: string[]
+}
+
 export interface AnalysisResult {
   session_id: string
   message: string
@@ -87,30 +124,8 @@ export interface AnalysisResult {
   sql: string
   columns: string[]
   rows: Record<string, string | number | null>[]
-  chart: {
-    type: 'bar' | 'line' | 'pie' | 'scatter' | 'area' | 'radar' | 'none'
-    title: string
-    x_field: string | null
-    y_field: string | null
-    series_name: string | null
-    series_field: string | null
-    series_fields?: string[]
-    recommendation?: {
-      type: 'bar' | 'line' | 'pie' | 'scatter' | 'area' | 'radar' | 'none'
-      source: string
-      reason: string
-      confidence?: number
-      alternatives?: string[]
-      display_mode?: 'single' | 'dual_axis' | 'facet'
-      secondary_y_field?: string | null
-      facet_fields?: string[]
-      distribution?: Record<string, unknown>
-    } | null
-    alternatives?: Array<'bar' | 'line' | 'pie' | 'scatter' | 'area' | 'radar'>
-    display_mode?: 'single' | 'dual_axis' | 'facet'
-    secondary_y_field?: string | null
-    facet_fields?: string[]
-  }
+  chart: ChartSpec
+  chart_sections?: ChartSection[]
   insights: string[]
   knowledge_refs: KnowledgeItem[]
   execution_mode: string

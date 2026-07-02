@@ -535,6 +535,238 @@ def _apply_python_chart(chart: dict[str, Any], suggestion: Any) -> dict[str, Any
     return updated
 
 
+def _wants_multi_chart(question: str) -> bool:
+    return any(term in question for term in ("完整分析", "全面分析", "多维度", "多角度", "综合分析", "分析报告", "完整报告", "各维度", "每一组"))
+
+
+def _chart_section(
+    *,
+    section_id: str,
+    title: str,
+    description: str,
+    rows: list[dict[str, Any]],
+    chart: dict[str, Any],
+    insights: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": section_id,
+        "title": title,
+        "description": description,
+        "columns": list(rows[0].keys()) if rows else [],
+        "rows": rows,
+        "chart": chart,
+        "insights": insights or [],
+    }
+
+
+def _chart_from_plan(
+    *,
+    question: str,
+    intent_label: str,
+    dataset_name: str,
+    rows: list[dict[str, Any]],
+    query_plan: QueryPlan,
+    title_prefix: str = "",
+) -> dict[str, Any]:
+    recommendation = recommend_chart(
+        question,
+        intent_label,
+        rows,
+        query_plan.x_field,
+        query_plan.y_field,
+        query_plan.series_fields,
+    )
+    chart_type = recommendation["type"]
+    title_bits = [dataset_name]
+    if title_prefix:
+        title_bits.append(title_prefix)
+    if query_plan.time_description:
+        title_bits.append(query_plan.time_description)
+    title_bits.append(query_plan.y_field)
+    return {
+        "type": chart_type,
+        "title": " - ".join(str(item) for item in title_bits if item),
+        "x_field": query_plan.x_field,
+        "y_field": query_plan.y_field,
+        "series_name": query_plan.y_field,
+        "series_field": query_plan.series_field,
+        "series_fields": query_plan.series_fields,
+        "recommendation": recommendation,
+        "alternatives": recommendation.get("alternatives", []),
+        "display_mode": recommendation.get("display_mode", "single"),
+        "secondary_y_field": recommendation.get("secondary_y_field"),
+        "facet_fields": recommendation.get("facet_fields", []),
+    }
+
+
+def _run_template_query(dataset: dict, query: str, limit: int) -> tuple[QueryPlan, list[dict[str, Any]]] | None:
+    try:
+        query_plan = _build_query(query, dataset, min(limit, 200))
+        with connect() as conn:
+            result = conn.execute(query_plan.sql, query_plan.params).fetchall()
+        rows = [_jsonable_row(dict(row)) for row in result]
+        if not rows:
+            return None
+        if query_plan.x_field not in rows[0] or query_plan.y_field not in rows[0]:
+            return None
+        return query_plan, rows
+    except Exception:
+        return None
+
+
+def _floatable(value: Any) -> bool:
+    if isinstance(value, bool) or value is None:
+        return False
+    try:
+        float(value)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def _infer_chart_fields(rows: list[dict[str, Any]]) -> tuple[str, str]:
+    if not rows:
+        return "", ""
+    columns = list(rows[0].keys())
+    numeric_columns = [column for column in columns if any(_floatable(row.get(column)) for row in rows[:20])]
+    y_field = numeric_columns[-1] if numeric_columns else (columns[-1] if columns else "")
+    x_field = next((column for column in columns if column != y_field and not any(_floatable(row.get(column)) for row in rows[:20])), "")
+    if not x_field:
+        x_field = next((column for column in columns if column != y_field), columns[0] if columns else "")
+    return x_field, y_field
+
+
+def _build_data_chart_sections(
+    *,
+    question: str,
+    intent_label: str,
+    dataset: dict,
+    rows: list[dict[str, Any]],
+    chart: dict[str, Any],
+    query_plan: QueryPlan,
+    limit: int,
+) -> list[dict[str, Any]]:
+    if not rows or chart.get("type") == "none":
+        return []
+
+    sections: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, tuple[str, ...], str]] = set()
+
+    def add_section(
+        section_id: str,
+        title: str,
+        description: str,
+        section_rows: list[dict[str, Any]],
+        section_chart: dict[str, Any],
+        section_plan: QueryPlan,
+        insights: list[str] | None = None,
+        discriminator: str = "",
+    ) -> None:
+        if not section_rows or section_chart.get("type") == "none":
+            return
+        key = (section_plan.x_field, section_plan.y_field, tuple(section_plan.series_fields), discriminator)
+        if key in seen:
+            return
+        seen.add(key)
+        sections.append(
+            _chart_section(
+                section_id=section_id,
+                title=title,
+                description=description,
+                rows=section_rows[:200],
+                chart=section_chart,
+                insights=insights,
+            )
+        )
+
+    if query_plan.x_field in rows[0] and query_plan.y_field in rows[0]:
+        add_section(
+            "main",
+            chart.get("title") or "核心图表",
+            "当前问题对应的主分析结果。",
+            rows,
+            chart,
+            query_plan,
+        )
+
+    if query_plan.series_fields:
+        grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            grouped[_series_label(row, query_plan.series_fields)].append(row)
+        for index, (series_name, group_rows) in enumerate(list(grouped.items())[:6], 1):
+            section_plan = QueryPlan(
+                query_plan.sql,
+                query_plan.params,
+                query_plan.x_field,
+                query_plan.y_field,
+                None,
+                [],
+                query_plan.time_description,
+            )
+            recommendation = recommend_chart(question, intent_label, group_rows, query_plan.x_field, query_plan.y_field, [])
+            section_chart = dict(chart)
+            section_chart.update(
+                {
+                    "type": recommendation.get("type") or chart.get("type"),
+                    "title": f"{series_name} - {query_plan.y_field}",
+                    "series_field": None,
+                    "series_fields": [],
+                    "recommendation": recommendation,
+                    "alternatives": recommendation.get("alternatives", []),
+                    "display_mode": recommendation.get("display_mode", "single"),
+                    "secondary_y_field": recommendation.get("secondary_y_field"),
+                    "facet_fields": recommendation.get("facet_fields", []),
+                }
+            )
+            add_section(
+                f"series-{index}",
+                series_name,
+                f"从「{series_name}」这一组单独观察 {query_plan.y_field}。",
+                group_rows,
+                section_chart,
+                section_plan,
+                discriminator=series_name,
+            )
+
+    if _wants_multi_chart(question):
+        profile = _column_profile(dataset["columns"])
+        dimension_queries: list[tuple[str, str, str]] = []
+        if profile.get("region"):
+            dimension_queries.append(("region", "区域维度", f"{question} 按地区分析"))
+        if profile.get("product"):
+            dimension_queries.append(("product", "产品维度", f"{question} 按产品类别分析"))
+        if profile.get("channel"):
+            dimension_queries.append(("channel", "渠道维度", f"{question} 按渠道分析"))
+        if profile.get("date"):
+            dimension_queries.append(("time", "时间趋势", f"{question} 按月趋势分析"))
+
+        for key, title, derived_question in dimension_queries:
+            if len(sections) >= 7:
+                break
+            result = _run_template_query(dataset, derived_question, limit)
+            if not result:
+                continue
+            section_plan, section_rows = result
+            section_chart = _chart_from_plan(
+                question=derived_question,
+                intent_label=intent_label,
+                dataset_name=dataset["name"],
+                rows=section_rows,
+                query_plan=section_plan,
+                title_prefix=title,
+            )
+            add_section(
+                f"dimension-{key}",
+                title,
+                f"围绕{title}拆分后的补充图表。",
+                section_rows,
+                section_chart,
+                section_plan,
+            )
+
+    return sections if len(sections) > 1 else []
+
+
 def _sql_repair_stats(attempts: list[dict[str, Any]], success: bool) -> dict[str, Any]:
     repair_attempts = max(0, len(attempts) - 1)
     return {
@@ -1178,6 +1410,7 @@ async def analyze_to_report_stream(
     insights_collected: list[str] = []
     all_rows: list[dict] = []
     chart_meta = {"type": "bar", "title": plan.get("report_title", "分析报告")}
+    chart_sections: list[dict[str, Any]] = []
 
     async for event in execute_plan_stream(
         plan, dataset["table_name"], dataset["columns"], effective_question, dataset["name"],
@@ -1185,8 +1418,43 @@ async def analyze_to_report_stream(
         if event["type"] == "section_done":
             insights_collected.append(event.get("narrative", ""))
             if event.get("rows"):
-                all_rows.extend(event["rows"][:10])
+                section_rows = [_jsonable_row(dict(row)) for row in event["rows"][:50]]
+                all_rows.extend(section_rows[:10])
+                x_field, y_field = _infer_chart_fields(section_rows)
+                chart_type = event.get("chart_type") or "bar"
+                if chart_type in {"table", "kpi_cards"}:
+                    chart_type = "bar"
+                if x_field and y_field:
+                    section_chart = {
+                        "type": chart_type if chart_type in {"bar", "line", "pie", "scatter", "area", "radar"} else "bar",
+                        "title": event.get("title") or "分析图表",
+                        "x_field": x_field,
+                        "y_field": y_field,
+                        "series_name": y_field,
+                        "series_field": None,
+                        "series_fields": [],
+                        "recommendation": {
+                            "type": chart_type if chart_type in {"bar", "line", "pie", "scatter", "area", "radar"} else "bar",
+                            "source": "report-pipeline",
+                            "reason": "多维报告管线为该分析章节生成的图表。",
+                            "confidence": 0.74,
+                        },
+                    }
+                    chart_sections.append(
+                        _chart_section(
+                            section_id=f"report-section-{event.get('index') or len(chart_sections) + 1}",
+                            title=event.get("title") or "分析章节",
+                            description=event.get("narrative") or "",
+                            rows=section_rows,
+                            chart=section_chart,
+                            insights=[event.get("narrative", "")] if event.get("narrative") else [],
+                        )
+                    )
         yield event
+
+    if chart_sections:
+        first = chart_sections[0]
+        chart_meta = first["chart"]
 
     # Build final result payload
     payload = {
@@ -1195,9 +1463,10 @@ async def analyze_to_report_stream(
         "intent": intent.get("task_type", "analysis"),
         "plan": plan.get("sections", []),
         "sql": "",
-        "columns": list(all_rows[0].keys()) if all_rows else [],
-        "rows": all_rows[:50],
+        "columns": chart_sections[0]["columns"] if chart_sections else (list(all_rows[0].keys()) if all_rows else []),
+        "rows": chart_sections[0]["rows"] if chart_sections else all_rows[:50],
         "chart": chart_meta,
+        "chart_sections": chart_sections,
         "insights": insights_collected,
         "knowledge_refs": [],
         "execution_mode": "report-pipeline",
@@ -1461,6 +1730,16 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         yield {"type": "step", "step_id": 5, "title": "深度分析 (Python/Pandas)", "status": "completed", "detail": "完成" if python_analysis and python_analysis["success"] else "未执行"}
         yield {"type": "thinking", "content": "已使用 Python/Pandas 完成深度分析" if (python_analysis and python_analysis["success"]) else "Python 分析未执行，使用 SQL 结果"}
 
+    chart_sections = _build_data_chart_sections(
+        question=effective_question,
+        intent_label=intent_result.label,
+        dataset=dataset,
+        rows=rows,
+        chart=chart,
+        query_plan=query_plan,
+        limit=settings.query_row_limit,
+    )
+
     # ══════════════════════════════════════════════════════════════════════
     # A-003 / A-005: Anchored Lightweight Reflection
     # ──────────────────────────────────────────────────────────────────────
@@ -1523,6 +1802,7 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         "columns": list(rows[0].keys()) if rows else [query_plan.x_field, query_plan.y_field],
         "rows": rows,
         "chart": chart,
+        "chart_sections": chart_sections,
         "insights": insights,
         "knowledge_refs": knowledge,
         "execution_mode": execution_mode,

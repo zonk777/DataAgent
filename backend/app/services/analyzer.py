@@ -1334,10 +1334,10 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
                         yield {"type": "thinking", "content": f"✅ 已补充 {len(patch)} 条洞察：{patch[0][:60]}..."}
                 else:
                     yield {"type": "thinking", "content": "✅ 洞察质量检查通过，所有锚点已覆盖"}
-        except Exception:
-            # Graceful degradation: if reflection fails, original insights
-            # pass through unchanged. The user sees the unmodified output.
-            pass
+        except Exception as reflection_exc:
+            import logging
+            logging.getLogger(__name__).warning("Reflection failed, using original insights: %s", reflection_exc)
+            yield {"type": "thinking", "content": f"⚡ 质量检查跳过（{str(reflection_exc)[:60]}），使用原始洞察"}  # Graceful degradation
 
     plan_steps = build_plan_steps(
         intent=intent_result,

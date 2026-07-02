@@ -43,7 +43,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, { ...init, credentials: 'include' })
   if (!response.ok) {
     const body = await response.json().catch(() => ({ detail: '请求失败' }))
-    throw new Error(body.detail || `请求失败 (${response.status})`)
+    let msg = body.detail
+    if (Array.isArray(msg)) msg = msg.map((e: any) => e.msg || JSON.stringify(e)).join('; ')
+    if (typeof msg !== 'string' || !msg) msg = `请求失败 (${response.status})`
+    throw new Error(msg)
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>

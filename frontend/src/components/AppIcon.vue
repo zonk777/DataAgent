@@ -14,7 +14,8 @@ defineProps<{ name: string; size?: number }>()
     <template v-else-if="name === 'send'"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></template>
     <template v-else-if="name === 'file'"><path d="M14 2H6a2 2 0 0 0-2 2v16h16V8Z"/><path d="M14 2v6h6M8 13h8M8 17h6"/></template>
     <template v-else-if="name === 'check'"><path d="m5 12 4 4L19 6"/></template>
+    <template v-else-if="name === 'search'"><circle cx="11" cy="11" r="7"/><path d="m20 20-4.2-4.2"/></template>
+    <template v-else-if="name === 'download'"><path d="M12 3v11"/><path d="m7 10 5 5 5-5"/><path d="M5 19h14"/></template>
     <template v-else><circle cx="12" cy="12" r="9"/><path d="M12 8v4l3 2"/></template>
   </svg>
 </template>
-

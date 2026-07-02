@@ -48,6 +48,10 @@ def _vector_store_enabled(settings: Settings | None = None) -> bool:
     return _store_name(settings) in SUPPORTED_VECTOR_STORES and settings.embedding_configured
 
 
+def _qdrant_store_label(settings: Settings) -> str:
+    return "qdrant-server" if settings.qdrant_url else "qdrant-local"
+
+
 def _payload(item: dict[str, Any], settings: Settings) -> dict[str, Any]:
     created_at = item["created_at"]
     if hasattr(created_at, "isoformat"):
@@ -69,11 +73,14 @@ _QDRANT_CLIENTS_LOCK = threading.Lock()
 
 def _qdrant_client(settings: Settings | None = None) -> QdrantClient:
     s = settings or get_settings()
-    url_key = s.qdrant_url or s.qdrant_path
+    url_key = f"{s.qdrant_url}|{s.qdrant_api_key}" if s.qdrant_url else s.qdrant_path
     with _QDRANT_CLIENTS_LOCK:
         if url_key not in _QDRANT_CLIENTS:
             if s.qdrant_url:
-                _QDRANT_CLIENTS[url_key] = QdrantClient(url=s.qdrant_url)
+                kwargs: dict[str, Any] = {"url": s.qdrant_url, "trust_env": False}
+                if s.qdrant_api_key:
+                    kwargs["api_key"] = s.qdrant_api_key
+                _QDRANT_CLIENTS[url_key] = QdrantClient(**kwargs)
             else:
                 s.qdrant_directory.mkdir(parents=True, exist_ok=True)
                 _QDRANT_CLIENTS[url_key] = QdrantClient(path=str(s.qdrant_directory))
@@ -159,7 +166,7 @@ async def _sync_qdrant(settings: Settings, items: list[dict[str, Any]], force: b
         count = client.count(collection_name=collection_name, exact=True).count if exists else 0
         return {
             "enabled": True,
-            "store": "qdrant-local",
+            "store": _qdrant_store_label(settings),
             "collection": collection_name,
             "indexed_count": count,
             "updated_count": 0,
@@ -190,7 +197,7 @@ async def _sync_qdrant(settings: Settings, items: list[dict[str, Any]], force: b
     count = client.count(collection_name=collection_name, exact=True).count
     return {
         "enabled": True,
-        "store": "qdrant-local",
+        "store": _qdrant_store_label(settings),
         "collection": collection_name,
         "dimension": dimension,
         "indexed_count": count,
@@ -580,7 +587,7 @@ def vector_status() -> dict[str, Any]:
     base["collection"] = collection_name
     if store == "qdrant":
         client = get_vector_client(settings)
-        base["store"] = "qdrant-local"
+        base["store"] = _qdrant_store_label(settings)
         if client.collection_exists(collection_name):
             base["indexed_count"] = client.count(collection_name=collection_name, exact=True).count
     elif store == "faiss":

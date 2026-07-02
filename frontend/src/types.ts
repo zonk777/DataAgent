@@ -181,6 +181,7 @@ export interface DashboardData {
 }
 
 export interface ConfigStatus {
+  api_mode?: 'system' | 'custom'
   llm_configured: boolean
   llm_model: string | null
   embedding_configured: boolean
@@ -190,6 +191,16 @@ export interface ConfigStatus {
   database_backend: string
   database_name: string
   environment: string
+}
+
+export interface ApiSettingsPayload {
+  mode: 'system' | 'custom'
+  llm_api_key?: string
+  llm_base_url?: string
+  llm_model?: string
+  embedding_api_key?: string
+  embedding_base_url?: string
+  embedding_model?: string
 }
 
 export interface AuditLog {

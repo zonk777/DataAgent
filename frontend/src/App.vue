@@ -43,7 +43,7 @@ const navItems: Array<{ id: ViewName; label: string; icon: string }> = [
   { id: 'accounts', label: '账户管理', icon: 'settings' },
   { id: 'settings', label: '系统配置', icon: 'settings' },
 ]
-const pageTitle = computed(() => navItems.find(i => i.id === activeView)?.label || 'DataAgent')
+const pageTitle = computed(() => navItems.find(i => i.id === activeView.value)?.label || 'DataAgent')
 const examples = ['统计各地区销售额', '按月份展示销售额趋势', '查询投诉率最高的区域', '分析华东地区转化率']
 
 async function loadBase() {
@@ -270,7 +270,7 @@ onMounted(bootstrap)
       <KnowledgeView v-else-if="activeView === 'knowledge'" :items="knowledge" @add="addKnowledge" @del="deleteKnowledge" />
       <AuditView v-else-if="activeView === 'audit'" />
       <AccountsView v-else-if="activeView === 'accounts'" :current="currentAdmin" :admins="admins" :datasets="datasets" @create="addAdmin" @update="updateAdmin" @delete="deleteAdmin" />
-      <SettingsView v-else :config="config" />
+      <SettingsView v-else :config="config" @updated="(c: ConfigStatus) => config = c" />
     </main>
   </div>
 </template>

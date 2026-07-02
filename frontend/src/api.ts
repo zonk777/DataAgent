@@ -1,4 +1,4 @@
-import type { AdminUser, AnalysisResult, AuditLog, ConfigStatus, DashboardData, Dataset, DatasetQuality, KnowledgeItem, SessionDetail, SessionSummary, StreamCallbacks } from './types'
+import type { AdminUser, AnalysisResult, ApiSettingsPayload, AuditLog, ConfigStatus, DashboardData, Dataset, DatasetQuality, KnowledgeItem, SessionDetail, SessionSummary, StreamCallbacks } from './types'
 
 const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 const CHUNK_UPLOAD_THRESHOLD = 8 * 1024 * 1024
@@ -199,6 +199,12 @@ export const api = {
   deleteAdmin: (id: number) => request<void>(`/auth/admins/${id}`, { method: 'DELETE' }),
   dashboard: () => request<DashboardData>('/dashboard'),
   config: () => request<ConfigStatus>('/config/status'),
+  saveApiSettings: (payload: ApiSettingsPayload) =>
+    request<ConfigStatus>('/config/api', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }),
   datasets: () => request<Dataset[]>('/datasets'),
   dataset: (id: number) => request<Dataset>(`/datasets/${id}`),
   updateDataset: (id: number, payload: { name: string; description: string }) =>

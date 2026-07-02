@@ -37,10 +37,24 @@ const chosenFile = ref<File | null>(null)
 
 function chooseFile(e: Event) {
   chosenFile.value = (e.target as HTMLInputElement).files?.[0] || null
+  if (chosenFile.value) question.value = ''
 }
 function removeFile() {
   chosenFile.value = null
   if (fileInput.value) fileInput.value.value = ''
+}
+
+function submitInput() {
+  if (props.loading) return
+  if (chosenFile.value) {
+    const file = chosenFile.value
+    const q = question.value || ''
+    question.value = ''
+    removeFile()
+    emit('analyzeFile', file, q)
+    return
+  }
+  if (question.value) emit('analyze', question.value)
 }
 
 function isLatestMessage(index: number) {
@@ -90,11 +104,11 @@ function isLatestMessage(index: number) {
             <button class="file-chip-remove" @click="removeFile" title="移除文件">&times;</button>
           </div>
           <div class="chat-input-row">
-            <textarea v-model="question" rows="2" placeholder="输入问题，或上传 PDF/Word/MD 文档进行分析..." @keydown.enter.exact.prevent="chosenFile ? emit('analyzeFile', chosenFile, question || '') : emit('analyze', question)"/>
+            <textarea v-model="question" rows="2" placeholder="输入问题，或上传 PDF/Word/MD 文档进行分析..." @keydown.enter.exact.prevent="submitInput"/>
             <div class="chat-actions">
               <input ref="fileInput" type="file" accept=".pdf,.docx,.doc,.md,.txt" @change="chooseFile" hidden />
               <button class="icon-btn" title="上传文档分析" :disabled="loading" @click="fileInput?.click()"><AppIcon name="upload" :size="17" /></button>
-              <button :disabled="loading || (!question && !chosenFile)" @click="chosenFile ? emit('analyzeFile', chosenFile, question || '') : emit('analyze', question)"><AppIcon name="send" :size="18" /></button>
+              <button :disabled="loading || (!question && !chosenFile)" @click="submitInput"><AppIcon name="send" :size="18" /></button>
             </div>
           </div>
         </div>

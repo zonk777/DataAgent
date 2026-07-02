@@ -229,10 +229,14 @@ async def run_react_loop(
         insights = [final_summary]
         chart_result["type"] = "none"
 
+    plan_lines = _format_analysis_plan(analysis_plan)
+    plan_steps = _analysis_plan_steps(analysis_plan)
+
     return {
         "message": final_summary or "分析完成。",
         "intent": executor.intent_label,
-        "plan": analysis_plan,
+        "plan": plan_lines,
+        "plan_steps": plan_steps,
         "sql": sql_executed,
         "columns": list(executor.query_results[0].keys()) if executor.query_results else [],
         "rows": executor.query_results[:50],
@@ -253,6 +257,43 @@ async def run_react_loop(
         "effective_question": question,
         "react_turns": len(analysis_plan),
     }
+
+
+def _format_analysis_plan(plan: list[dict]) -> list[str]:
+    """Convert structured ReAct tool steps to the legacy response shape."""
+    lines: list[str] = []
+    for index, item in enumerate(plan, 1):
+        tool = str(item.get("tool") or "tool")
+        turn = item.get("turn")
+        args = str(item.get("args_summary") or "").strip()
+        prefix = f"第 {item.get('step') or index} 步：调用 {tool}"
+        if turn:
+            prefix += f"（第 {turn} 轮）"
+        if args:
+            prefix += f"：{args}"
+        lines.append(prefix)
+    return lines
+
+
+def _analysis_plan_steps(plan: list[dict]) -> list[dict]:
+    """Expose ReAct steps through the newer structured plan_steps field."""
+    steps: list[dict] = []
+    for index, item in enumerate(plan, 1):
+        tool = str(item.get("tool") or "tool")
+        args = str(item.get("args_summary") or "").strip()
+        try:
+            step_id = int(item.get("step") or index)
+        except (TypeError, ValueError):
+            step_id = index
+        steps.append({
+            "id": step_id,
+            "title": f"调用 {tool}",
+            "tool": tool,
+            "depends_on": [step_id - 1] if step_id > 1 else [],
+            "status": "completed",
+            "detail": args,
+        })
+    return steps
 
 
 def _force_conclusion(executor: ToolExecutor, messages: list[dict]) -> str:

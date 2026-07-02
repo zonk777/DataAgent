@@ -1110,11 +1110,16 @@ async def analyze_to_report_stream(
 async def analyze(question: str, session_id: str | None, dataset_id: int | None) -> dict:
     """Non-streaming analysis: runs the full pipeline and returns the result dict."""
     result = None
+    last_error = None
     async for event in analyze_stream(question, session_id, dataset_id):
         if event["type"] == "result":
             result = event["data"]
+        elif event["type"] == "error":
+            last_error = event.get("message") or event.get("error")
+        elif event["type"] == "done" and event.get("error"):
+            last_error = event.get("error")
     if result is None:
-        raise ValueError("分析流程未返回结果")
+        raise ValueError(last_error or "分析流程未返回结果")
     return result
 
 
@@ -1220,7 +1225,7 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
         )
     except FieldNotFoundError as e:
         yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "failed", "detail": e.message}
-        yield {"type": "done", "error": e.message}
+        yield {"type": "error", "message": e.message}
         return
     yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "completed", "detail": f"返回 {len(rows)} 条结果"}
 

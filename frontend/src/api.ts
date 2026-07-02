@@ -4,6 +4,74 @@ const API_BASE = import.meta.env.VITE_API_BASE || '/api/v1'
 const CHUNK_UPLOAD_THRESHOLD = 8 * 1024 * 1024
 const CHUNK_SIZE = 5 * 1024 * 1024
 
+function normalizeDetail(detail: unknown): string {
+  if (Array.isArray(detail)) return detail.map((e: any) => e?.msg || e?.message || JSON.stringify(e)).join('; ')
+  if (detail && typeof detail === 'object') {
+    const obj = detail as Record<string, unknown>
+    const value = obj.detail || obj.message || obj.error
+    if (value) return normalizeDetail(value)
+    return JSON.stringify(obj)
+  }
+  return typeof detail === 'string' ? detail.trim() : ''
+}
+
+function fallbackStatusMessage(status: number, fallback = '请求失败') {
+  const map: Record<number, string> = {
+    400: '请求参数不正确，请检查问题、数据源或上传文件。',
+    401: '登录已失效，请重新登录后再试。',
+    403: '当前账号没有权限执行该操作或访问该数据源。',
+    404: '接口或资源不存在，请确认后端服务版本是否最新。',
+    413: '上传文件过大，请压缩或拆分文件后重试。',
+    422: '请求格式校验失败，请检查输入内容是否为空或格式不正确。',
+    429: '请求过于频繁或模型服务限流，请稍后再试。',
+    500: '后端服务内部错误，请查看后端控制台日志。',
+    502: '后端网关/代理连接失败，请检查模型服务、代理或本地服务是否可用。',
+    503: '后端服务暂不可用，请确认数据库、Qdrant、模型 API 是否已启动。',
+    504: '请求超时，请缩小分析范围或稍后重试。',
+  }
+  return `${map[status] || fallback}（HTTP ${status}）`
+}
+
+async function readResponseError(response: Response, fallback = '请求失败') {
+  const text = await response.text().catch(() => '')
+  if (text) {
+    try {
+      const body = JSON.parse(text)
+      const detail = normalizeDetail(body.detail || body.message || body.error || body)
+      if (detail) return detail
+    } catch {
+      const plain = text.trim()
+      if (plain) return plain
+    }
+  }
+  return fallbackStatusMessage(response.status, fallback)
+}
+
+function parseXhrError(status: number, responseText: string, fallback = '请求失败') {
+  if (responseText) {
+    try {
+      const body = JSON.parse(responseText)
+      const detail = normalizeDetail(body.detail || body.message || body.error || body)
+      if (detail) return detail
+    } catch {
+      const plain = responseText.trim()
+      if (plain) return plain
+    }
+  }
+  return fallbackStatusMessage(status, fallback)
+}
+
+function networkErrorMessage(err: unknown, fallback = '网络连接失败') {
+  const message = err instanceof Error ? err.message : String(err || '')
+  if (message.includes('Failed to fetch')) {
+    return `${fallback}：浏览器无法连接后端。请确认后端已启动、端口正确、代理没有拦截 localhost。`
+  }
+  if (message.includes('NetworkError')) {
+    return `${fallback}：网络连接被中断，请检查后端服务、代理和防火墙。`
+  }
+  return message || fallback
+}
+
 export type UploadProgress = {
   percent: number
   status: string
@@ -40,13 +108,14 @@ export type MySQLSchema = {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, { ...init, credentials: 'include' })
+  let response: Response
+  try {
+    response = await fetch(`${API_BASE}${path}`, { ...init, credentials: 'include' })
+  } catch (err) {
+    throw new Error(networkErrorMessage(err, '请求后端失败'))
+  }
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: '请求失败' }))
-    let msg = body.detail
-    if (Array.isArray(msg)) msg = msg.map((e: any) => e.msg || JSON.stringify(e)).join('; ')
-    if (typeof msg !== 'string' || !msg) msg = `请求失败 (${response.status})`
-    throw new Error(msg)
+    throw new Error(await readResponseError(response))
   }
   if (response.status === 204) return undefined as T
   return response.json() as Promise<T>
@@ -80,14 +149,10 @@ function xhrFormRequest<T>(
         resolve(xhr.responseText ? JSON.parse(xhr.responseText) as T : undefined as T)
         return
       }
-      try {
-        const body = JSON.parse(xhr.responseText)
-        reject(new Error(body.detail || `请求失败 (${xhr.status})`))
-      } catch {
-        reject(new Error(`请求失败 (${xhr.status})`))
-      }
+      reject(new Error(parseXhrError(xhr.status, xhr.responseText)))
     }
-    xhr.onerror = () => reject(new Error('网络连接失败'))
+    xhr.onerror = () => reject(new Error('网络连接失败：上传请求无法到达后端，请确认后端服务已启动且代理没有拦截 localhost。'))
+    xhr.ontimeout = () => reject(new Error('请求超时：文件上传或后端处理时间过长，请缩小文件或稍后重试。'))
     xhr.send(form)
   })
 }
@@ -296,8 +361,7 @@ export const api = {
         })
 
         if (!response.ok) {
-          const body = await response.json().catch(() => ({ detail: '请求失败' }))
-          callbacks.onError(body.detail || `请求失败 (${response.status})`)
+          callbacks.onError(await readResponseError(response, '智能分析请求失败'))
           return
         }
 
@@ -334,10 +398,16 @@ export const api = {
                     break
                   case 'done':
                     doneCalled = true
+                    if (event.error || event.message) {
+                      callbacks.onError(normalizeDetail(event.error || event.message) || '分析失败：后端未返回具体错误')
+                      return
+                    }
                     callbacks.onDone()
                     break
                   case 'error':
-                    callbacks.onError(event.message || '未知错误')
+                    doneCalled = true
+                    callbacks.onError(normalizeDetail(event.message || event.error) || '分析失败：后端未返回具体错误')
+                    return
                     break
                 }
               } catch {
@@ -355,9 +425,14 @@ export const api = {
               const event = JSON.parse(line.slice(6))
               if (event.type === 'done') {
                 doneCalled = true
-                callbacks.onDone()
+                if (event.error || event.message) {
+                  callbacks.onError(normalizeDetail(event.error || event.message) || '分析失败：后端未返回具体错误')
+                } else {
+                  callbacks.onDone()
+                }
               } else if (event.type === 'error') {
-                callbacks.onError(event.message || '未知错误')
+                doneCalled = true
+                callbacks.onError(normalizeDetail(event.message || event.error) || '分析失败：后端未返回具体错误')
               }
             } catch {
               // skip malformed final event
@@ -373,7 +448,7 @@ export const api = {
         if (err.name === 'AbortError') {
           aborted = true
         } else {
-          callbacks.onError(err.message || '网络连接失败')
+          callbacks.onError(networkErrorMessage(err, '智能分析请求失败'))
         }
       }
     }

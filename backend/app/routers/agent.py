@@ -12,6 +12,7 @@ from ..services.analysis_planner import plan_analysis
 from ..services.audit import log_action
 from ..services.auth import current_admin
 from ..services.data_profiler import profile_dataset
+from ..services.error_messages import format_analysis_error
 from ..services.meta_router import route_intent
 from ..services.permissions import ensure_dataset_access, first_accessible_dataset_id
 from ..services.reports import (
@@ -128,7 +129,8 @@ async def chat_report_stream(
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
             log_action("analysis_request", "session", session_id or "", f"[报告流] {question}", actor=actor)
         except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            detail = format_analysis_error(exc, operation="报告分析", filename=filename, dataset_id=ds_id)
+            yield f"data: {json.dumps({'type': 'error', 'message': detail}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -186,8 +188,10 @@ async def chat_with_file(
         )
         log_action("analysis_request", "session", result.get("session_id"), f"[文件分析] {file.filename}", actor=actor)
         return result
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        detail = format_analysis_error(exc, operation="文件分析", filename=file.filename, dataset_id=dataset_id)
+        log_action("analysis_request", "session", session_id or "", detail, status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=detail) from exc
 
 
 @router.post("/agent/chat", response_model=AnalysisResponse)
@@ -201,8 +205,9 @@ async def chat(payload: ChatRequest, request: Request) -> dict:
         log_action("analysis_request", "session", result.get("session_id"), payload.question, actor=actor)
         return result
     except Exception as exc:
-        log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = format_analysis_error(exc, operation="智能分析", dataset_id=dataset_id)
+        log_action("analysis_request", "session", payload.session_id, detail, status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=detail) from exc
 
 
 @router.post("/agent/chat/stream")
@@ -219,8 +224,9 @@ async def chat_stream(payload: ChatRequest, request: Request):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
             log_action("analysis_request", "session", payload.session_id or "", payload.question, actor=actor)
         except Exception as exc:
-            log_action("analysis_request", "session", payload.session_id or "", str(exc), status="failed", actor=actor)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            detail = format_analysis_error(exc, operation="智能分析", dataset_id=dataset_id)
+            log_action("analysis_request", "session", payload.session_id or "", detail, status="failed", actor=actor)
+            yield f"data: {json.dumps({'type': 'error', 'message': detail}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
@@ -237,8 +243,9 @@ async def chat_react(payload: ChatRequest, request: Request) -> dict:
         log_action("analysis_request", "session", result.get("session_id"), f"[ReAct] {payload.question}", actor=actor)
         return result
     except Exception as exc:
-        log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = format_analysis_error(exc, operation="ReAct 智能分析", dataset_id=dataset_id)
+        log_action("analysis_request", "session", payload.session_id, detail, status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=detail) from exc
 
 
 @router.post("/agent/chat/react/mcp", response_model=AnalysisResponse)
@@ -253,8 +260,9 @@ async def chat_react_mcp(payload: ChatRequest, request: Request) -> dict:
         log_action("analysis_request", "session", result.get("session_id"), f"[ReAct+MCP] {payload.question}", actor=actor)
         return result
     except Exception as exc:
-        log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        detail = format_analysis_error(exc, operation="ReAct/MCP 智能分析", dataset_id=dataset_id)
+        log_action("analysis_request", "session", payload.session_id, detail, status="failed", actor=actor)
+        raise HTTPException(status_code=400, detail=detail) from exc
 
 
 @router.post("/agent/chat/react/stream")
@@ -288,8 +296,9 @@ async def chat_react_stream(payload: ChatRequest, request: Request):
 
             log_action("analysis_request", "session", result.get("session_id"), f"[ReAct+Stream] {payload.question}", actor=actor)
         except Exception as exc:
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
-            log_action("analysis_request", "session", payload.session_id, str(exc), status="failed", actor=actor)
+            detail = format_analysis_error(exc, operation="ReAct/MCP 流式分析", dataset_id=dataset_id)
+            yield f"data: {json.dumps({'type': 'error', 'message': detail}, ensure_ascii=False)}\n\n"
+            log_action("analysis_request", "session", payload.session_id, detail, status="failed", actor=actor)
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 

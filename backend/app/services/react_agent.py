@@ -122,12 +122,16 @@ async def run_react_loop(
     chart_result: dict = {"type": "bar", "title": ""}
     insights: list[str] = []
     final_summary = ""
+    last_llm_error: Exception | None = None
 
     for turn in range(MAX_REACT_TURNS):
         try:
             response = await _call_llm(messages, tool_schemas)
         except (httpx.HTTPError, KeyError, TypeError) as exc:
             logger.warning("ReAct turn %d LLM call failed: %s", turn + 1, exc)
+            last_llm_error = exc
+            if not analysis_plan and not executor.query_results and not executor.knowledge_results:
+                raise RuntimeError(f"ReAct 模型调用失败，尚未执行任何分析工具：{exc}") from exc
             break
 
         tool_calls = _extract_tool_calls(response)
@@ -210,6 +214,20 @@ async def run_react_loop(
     # If LLM never called finish_analysis, force-generate a conclusion
     if not final_summary and executor.query_results:
         final_summary = _force_conclusion(executor, messages)
+    if not analysis_plan and not executor.query_results and not executor.knowledge_results:
+        if last_llm_error:
+            raise RuntimeError(f"ReAct 分析没有执行任何工具，模型调用失败：{last_llm_error}") from last_llm_error
+        raise RuntimeError("ReAct 分析没有执行任何工具，无法确认已经完成数据查询或文档分析")
+    if not executor.query_results and not executor.knowledge_results and not sql_executed:
+        raise RuntimeError("ReAct 分析没有获取到任何数据结果或知识依据，因此不能标记为分析完成")
+    if not final_summary and not insights and sql_executed and not executor.query_results:
+        final_summary = "已执行数据查询，但当前条件下没有匹配到数据。请检查筛选条件、时间范围、字段名称，或换一个数据源后再试。"
+        insights = [final_summary]
+        chart_result["type"] = "none"
+    if not final_summary and not insights and executor.knowledge_results:
+        final_summary = "已检索到相关文档或业务知识，但模型没有生成最终总结。请换一种问法，或检查模型 API 是否支持工具调用。"
+        insights = [final_summary]
+        chart_result["type"] = "none"
 
     return {
         "message": final_summary or "分析完成。",

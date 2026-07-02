@@ -746,6 +746,60 @@ def _store_assistant(session_id: str, payload: dict, audit_action: str, dataset_
         conn.execute("UPDATE sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ?", (session_id,))
 
 
+def _business_feedback_payload(
+    *,
+    session_id: str,
+    question: str,
+    effective_question: str,
+    message: str,
+    intent_result: IntentResult,
+    dataset: dict | None = None,
+    sql: str = "",
+    columns: list[str] | None = None,
+    knowledge: list[dict[str, Any]] | None = None,
+    context_applied: bool = False,
+) -> dict[str, Any]:
+    """Return a normal assistant answer for user/data issues instead of a system error."""
+    plan_steps = build_plan_steps(
+        intent=intent_result,
+        answer_type="data_analysis",
+        execution_mode="business-feedback",
+        dataset_name=(dataset or {}).get("name", ""),
+        chart_type="none",
+    )
+    return {
+        "session_id": session_id,
+        "message": message,
+        "intent": intent_result.display_name,
+        "intent_label": intent_result.label,
+        "intent_confidence": intent_result.confidence,
+        "intent_method": intent_result.method,
+        "intent_reason": intent_result.reason,
+        "sql_source": "business_feedback",
+        "plan": plan_titles(plan_steps),
+        "plan_steps": plan_steps,
+        "sql": sql,
+        "columns": columns or [],
+        "rows": [],
+        "chart": {
+            "type": "none",
+            "title": "未生成图表",
+            "x_field": None,
+            "y_field": None,
+            "series_name": None,
+            "series_field": None,
+            "series_fields": [],
+        },
+        "insights": [message],
+        "knowledge_refs": knowledge or [],
+        "execution_mode": "business-feedback",
+        "analysis_engine": "none",
+        "answer_type": "data_analysis",
+        "context_applied": context_applied,
+        "effective_question": effective_question or question,
+    }
+
+
 async def _answer_knowledge(
     question: str,
     effective_question: str,
@@ -914,7 +968,23 @@ async def analyze_react(question: str, session_id: str | None, dataset_id: int |
     # M-001: compress old history
     compressed = await compress_history(history) if len(history) > 3 else ""
 
-    dataset = _dataset(dataset_id)
+    try:
+        dataset = _dataset(dataset_id)
+    except ValueError as exc:
+        intent_result = IntentResult("data_query", 0.8, "rules", "没有可用数据源")
+        message = f"{exc}。请先在“数据源”页面上传或导入数据，然后再发起分析。"
+        _store_user(session_id, question, dataset_id)
+        payload = _business_feedback_payload(
+            session_id=session_id,
+            question=question,
+            effective_question=effective_question,
+            message=message,
+            intent_result=intent_result,
+            dataset=None,
+            context_applied=is_followup,
+        )
+        _store_assistant(session_id, payload, "analyze", dataset_id)
+        return payload
 
     # Inject compressed context into question for ReAct agent
     react_question = effective_question
@@ -982,7 +1052,24 @@ async def analyze_with_document(
     settings = get_settings()
     session_id = session_id or uuid.uuid4().hex
     history = _load_history(session_id)
-    dataset = _dataset(dataset_id)
+    try:
+        dataset = _dataset(dataset_id)
+    except ValueError as exc:
+        intent_result = IntentResult("data_query", 0.8, "rules", "没有可用数据源")
+        effective_question = question or f"分析文档: {filename}"
+        message = f"{exc}。请先在“数据源”页面上传或导入数据，然后再发起分析。"
+        _store_user(session_id, effective_question, dataset_id)
+        payload = _business_feedback_payload(
+            session_id=session_id,
+            question=question,
+            effective_question=effective_question,
+            message=message,
+            intent_result=intent_result,
+            dataset=None,
+            context_applied=False,
+        )
+        _store_assistant(session_id, payload, "analyze", dataset_id)
+        return payload
 
     # Parse the document
     try:
@@ -1202,7 +1289,24 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
     yield {"type": "step", "step_id": 1, "title": plan_step_titles[0] if len(plan_step_titles) > 0 else "意图识别", "status": "completed", "detail": intent_result.display_name}
 
     yield {"type": "step", "step_id": 2, "title": plan_step_titles[1] if len(plan_step_titles) > 1 else "分析数据集", "status": "running"}
-    dataset = _dataset(dataset_id)
+    try:
+        dataset = _dataset(dataset_id)
+    except ValueError as exc:
+        message = f"{exc}。请先在“数据源”页面上传或导入数据，然后再发起分析。"
+        payload = _business_feedback_payload(
+            session_id=session_id,
+            question=question,
+            effective_question=effective_question,
+            message=message,
+            intent_result=intent_result,
+            dataset=None,
+            context_applied=context_applied,
+        )
+        _store_assistant(session_id, payload, "analyze", dataset_id)
+        yield {"type": "step", "step_id": 2, "title": "分析数据源", "status": "completed", "detail": "没有可用数据源，已生成说明"}
+        yield {"type": "result", "data": payload}
+        yield {"type": "done"}
+        return
     dataset_id = dataset["id"]
     yield {"type": "thinking", "content": f"使用数据集「{dataset['name']}」，包含 {len(dataset['columns'])} 个字段、约 {dataset.get('row_count', '?')} 条数据"}
     yield {"type": "step", "step_id": 2, "title": plan_step_titles[1] if len(plan_step_titles) > 1 else "分析数据集", "status": "completed", "detail": dataset["name"]}
@@ -1224,10 +1328,47 @@ async def analyze_stream(question: str, session_id: str | None, dataset_id: int 
             intent_reason=intent_result.reason,  # Q-004: 意图推理上下文注入 SQL 生成
         )
     except FieldNotFoundError as e:
-        yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "failed", "detail": e.message}
-        yield {"type": "error", "message": e.message}
+        message = f"{e.message}。这通常表示当前数据源中没有用户问题提到的字段、指标或业务对象。请换一个数据源、检查字段说明，或在业务知识库中补充对应指标口径。"
+        payload = _business_feedback_payload(
+            session_id=session_id,
+            question=question,
+            effective_question=effective_question,
+            message=message,
+            intent_result=intent_result,
+            dataset=dataset,
+            knowledge=knowledge,
+            context_applied=context_applied,
+        )
+        _store_assistant(session_id, payload, "analyze", dataset_id)
+        yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "completed", "detail": "字段或指标不存在，已生成说明"}
+        yield {"type": "result", "data": payload}
+        yield {"type": "done"}
         return
     yield {"type": "step", "step_id": 3, "title": plan_step_titles[2] if len(plan_step_titles) > 2 else "构建查询", "status": "completed", "detail": f"返回 {len(rows)} 条结果"}
+
+    if not rows:
+        message = (
+            "查询已执行，但当前条件下没有匹配到数据。"
+            "可能原因是时间范围、地区/产品等筛选条件没有对应记录，或者当前数据源不包含这类业务数据。"
+            "你可以放宽筛选条件、换一个数据源，或先在“数据源”页面查看字段和数据预览。"
+        )
+        payload = _business_feedback_payload(
+            session_id=session_id,
+            question=question,
+            effective_question=effective_question,
+            message=message,
+            intent_result=intent_result,
+            dataset=dataset,
+            sql=safe_sql,
+            columns=[query_plan.x_field, query_plan.y_field],
+            knowledge=knowledge,
+            context_applied=context_applied,
+        )
+        _store_assistant(session_id, payload, "analyze", dataset_id)
+        yield {"type": "step", "step_id": 4, "title": "生成说明", "status": "completed", "detail": "没有匹配数据，已生成说明"}
+        yield {"type": "result", "data": payload}
+        yield {"type": "done"}
+        return
 
     yield {"type": "step", "step_id": 4, "title": plan_step_titles[3] if len(plan_step_titles) > 3 else "生成洞察", "status": "running"}
     draft = _draft_insights(rows, query_plan.x_field, query_plan.y_field, query_plan.series_fields)

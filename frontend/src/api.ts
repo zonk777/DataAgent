@@ -349,6 +349,7 @@ export const api = {
     const controller = new AbortController()
     let aborted = false
     let doneCalled = false
+    let resultReceived = false
 
     const run = async () => {
       try {
@@ -394,12 +395,17 @@ export const api = {
                     callbacks.onThinking(event.content || '')
                     break
                   case 'result':
+                    resultReceived = true
                     callbacks.onResult(event.data)
                     break
                   case 'done':
                     doneCalled = true
                     if (event.error || event.message) {
                       callbacks.onError(normalizeDetail(event.error || event.message) || '分析失败：后端未返回具体错误')
+                      return
+                    }
+                    if (!resultReceived) {
+                      callbacks.onError('分析流程提前结束：后端没有返回分析结果。请重试，或检查后端控制台日志。')
                       return
                     }
                     callbacks.onDone()
@@ -427,6 +433,8 @@ export const api = {
                 doneCalled = true
                 if (event.error || event.message) {
                   callbacks.onError(normalizeDetail(event.error || event.message) || '分析失败：后端未返回具体错误')
+                } else if (!resultReceived) {
+                  callbacks.onError('分析流程提前结束：后端没有返回分析结果。请重试，或检查后端控制台日志。')
                 } else {
                   callbacks.onDone()
                 }
@@ -440,9 +448,13 @@ export const api = {
           }
         }
 
-        // Guard: ensure onDone is always called when stream ends naturally
+        // Guard: only a stream that already delivered a result may finish without an explicit done event.
         if (!aborted && !doneCalled) {
-          callbacks.onDone()
+          if (resultReceived) {
+            callbacks.onDone()
+          } else {
+            callbacks.onError('分析流已中断：没有收到分析结果。请检查后端是否报错、网络是否断开，或稍后重试。')
+          }
         }
       } catch (err: any) {
         if (err.name === 'AbortError') {

@@ -123,6 +123,12 @@ function analyze(q: string) {
       assistantMsg._streamed = true
     },
     async onDone() {
+      if (!assistantMsg.payload) {
+        chatMessages.value.pop()
+        error.value = '分析流程提前结束：没有收到有效分析结果。请重试，或查看后端控制台日志。'
+        loading.value = false
+        return
+      }
       loading.value = false
       // Auto-collapse thinking after a short delay
       setTimeout(() => { thinkingCollapsed.value = true }, 1500)

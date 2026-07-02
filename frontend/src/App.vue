@@ -266,7 +266,7 @@ onMounted(bootstrap)
 
       <OverviewView v-if="activeView === 'overview'" :dashboard="dashboard" :datasets="datasets" @analyze="analyze" @inspect="inspectDataset" @nav="(v: string) => activeView = v as ViewName" />
       <AnalystView v-else-if="activeView === 'analyst'" :sessions="sessions" :chat-messages="chatMessages" :result="result" :loading="loading" :session-id="sessionId" :examples="examples" :thinking-steps="thinkingSteps" :thinking-text="thinkingText" :thinking-collapsed="thinkingCollapsed" @analyze="analyze" @analyze-file="analyzeFile" @open-session="openSession" @delete-session="deleteSession" @new-session="newSession" @show-result="(m: ChatMessage) => { if (m.payload) result = m.payload }" @toggle-thinking="toggleThinking" />
-      <DatasetsView v-else-if="activeView === 'datasets'" :datasets="datasets" :selected="selectedDataset" :selected-id="selectedDatasetId" @upload="doUpload" @inspect="inspectDataset" />
+      <DatasetsView v-else-if="activeView === 'datasets'" :datasets="datasets" :selected="selectedDataset" :selected-id="selectedDatasetId" :current-admin="currentAdmin" @upload="doUpload" @inspect="inspectDataset" />
       <KnowledgeView v-else-if="activeView === 'knowledge'" :items="knowledge" @add="addKnowledge" @del="deleteKnowledge" />
       <AuditView v-else-if="activeView === 'audit'" />
       <AccountsView v-else-if="activeView === 'accounts'" :current="currentAdmin" :admins="admins" :datasets="datasets" @create="addAdmin" @update="updateAdmin" @delete="deleteAdmin" />

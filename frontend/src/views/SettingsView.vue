@@ -83,6 +83,7 @@ async function saveApiSettings() {
     saveMessage.value = apiMode.value === 'system' ? '已切换为系统 API' : '自定义 API 已保存并启用'
   } catch (err: any) {
     saveError.value = err.message || '保存 API 设置失败'
+    window.alert(saveError.value)
   } finally {
     saving.value = false
   }

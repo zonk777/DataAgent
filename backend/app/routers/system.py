@@ -82,6 +82,72 @@ def _write_env_values(updates: dict[str, str]) -> None:
     ENV_PATH.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
+def _embedding_url(base_url: str) -> str:
+    base = base_url.rstrip("/")
+    return base if base.endswith("/embeddings") else f"{base}/embeddings"
+
+
+def _ensure_openai_compatible_response(response: httpx.Response, label: str) -> None:
+    if response.status_code in {401, 403}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{label} API Key 无效或没有权限，请检查后再保存。",
+        )
+    if response.status_code == 404:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{label} 接口地址不正确，请检查 Base URL。",
+        )
+    if response.status_code >= 400:
+        detail = response.text[:180] if response.text else f"HTTP {response.status_code}"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{label} 校验失败：{detail}",
+        )
+
+
+def _validate_llm_config(api_key: str, base_url: str) -> None:
+    try:
+        with httpx.Client(timeout=12) as client:
+            response = client.get(
+                f"{base_url.rstrip('/')}/models",
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        _ensure_openai_compatible_response(response, "大模型")
+    except HTTPException:
+        raise
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"大模型接口无法连接，请检查 Base URL 或网络：{type(exc).__name__}",
+        ) from exc
+
+
+def _validate_embedding_config(api_key: str, base_url: str, model: str) -> None:
+    try:
+        with httpx.Client(timeout=20) as client:
+            response = client.post(
+                _embedding_url(base_url),
+                headers={"Authorization": f"Bearer {api_key}"},
+                json={"model": model, "input": ["ping"], "encoding_format": "float"},
+            )
+        _ensure_openai_compatible_response(response, "Embedding")
+        data = response.json()
+        vectors = data.get("data") if isinstance(data, dict) else None
+        if not vectors or not isinstance(vectors, list):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Embedding 校验失败：服务返回格式不正确，请检查模型名称。",
+            )
+    except HTTPException:
+        raise
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Embedding 接口无法验证，请检查 Key、Base URL 或模型：{type(exc).__name__}",
+        ) from exc
+
+
 def _config_response() -> dict:
     settings = get_settings()
     vectors = vector_status()
@@ -201,6 +267,9 @@ def update_api_config(payload: ApiConfigPayload, request: Request) -> dict:
             missing.append("Embedding 模型")
         if missing:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="请填写：" + "、".join(missing))
+
+        _validate_llm_config(llm_key, llm_base_url)
+        _validate_embedding_config(embedding_key, embedding_base_url, embedding_model)
 
         updates.update(
             {

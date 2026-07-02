@@ -17,4 +17,5 @@ dist/
 backend/storage/uploads/*
 !backend/storage/uploads/.gitkeep
 backend/storage/qdrant/
+backend/storage/logs/
 review-reports/*

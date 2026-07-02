@@ -17,6 +17,7 @@ from .knowledge import search_knowledge
 from .llm import answer_from_knowledge, patch_insights, polish_insights, reflect_on_insights
 from .analysis_planner import plan_analysis
 from .data_profiler import profile_dataset
+from .document_analyzer import analyze_uploaded_document, wants_database_context
 from .dimension_executor import execute_plan_stream
 from .memory import compress_history, format_profile_context, llm_merge_followup, load_user_profile, update_user_profile_from_analysis
 from .meta_router import route_intent
@@ -1043,21 +1044,44 @@ async def analyze_with_document(
     filename: str,
     file_content: bytes,
 ) -> dict:
-    """Chat-based document analysis — parse PDF/Word/MD/TXT and analyze with context.
+    """Analyze an uploaded file.
 
-    Flow: parse document → inject content as knowledge → analyze with full pipeline.
+    Default behavior is file-first analysis.  The relational dataset is used
+    only when the user explicitly asks to combine the uploaded file with the
+    current database/data source.
     """
     from .knowledge_documents import extract_document_text
 
-    settings = get_settings()
     session_id = session_id or uuid.uuid4().hex
     history = _load_history(session_id)
+
+    # Parse the document
+    try:
+        doc_text = extract_document_text(filename, file_content)
+    except ValueError as exc:
+        raise ValueError(f"文档解析失败：{exc}") from exc
+
+    doc_title = filename.rsplit(".", 1)[0] if "." in filename else filename
+    effective_question = question or f"分析文档: {doc_title}"
+
+    if not wants_database_context(effective_question):
+        document_result = await analyze_uploaded_document(
+            session_id=session_id,
+            filename=filename,
+            text=doc_text,
+            question=effective_question,
+            history=history,
+        )
+        document_result["document_analyzed"] = doc_title
+        _store_user(session_id, effective_question, dataset_id)
+        _store_assistant(session_id, document_result, "document_analyze", dataset_id)
+        return document_result
+
     try:
         dataset = _dataset(dataset_id)
     except ValueError as exc:
-        intent_result = IntentResult("data_query", 0.8, "rules", "没有可用数据源")
-        effective_question = question or f"分析文档: {filename}"
-        message = f"{exc}。请先在“数据源”页面上传或导入数据，然后再发起分析。"
+        intent_result = IntentResult("knowledge_qa", 0.8, "rules", "用户要求结合数据库，但没有可用数据源")
+        message = f"{exc}。我已收到文件，但你要求结合数据库分析；请先在“数据源”页面上传或导入数据，或改为只分析文件。"
         _store_user(session_id, effective_question, dataset_id)
         payload = _business_feedback_payload(
             session_id=session_id,
@@ -1068,24 +1092,15 @@ async def analyze_with_document(
             dataset=None,
             context_applied=False,
         )
-        _store_assistant(session_id, payload, "analyze", dataset_id)
+        _store_assistant(session_id, payload, "document_analyze", dataset_id)
         return payload
-
-    # Parse the document
-    try:
-        doc_text = extract_document_text(filename, file_content)
-    except ValueError as exc:
-        raise ValueError(f"文档解析失败：{exc}") from exc
-
-    # Truncate to reasonable context size
-    doc_text = doc_text[:8000]
-    doc_title = filename.rsplit(".", 1)[0] if "." in filename else filename
 
     # Build document-augmented question
     augmented_question = (
         f"[上传文档] {doc_title}\n"
-        f"[文档内容摘要]\n{doc_text[:4000]}\n\n"
-        f"[用户问题] {question or '请分析这份文档的关键信息，总结要点。'}"
+        f"[文档内容摘要]\n{doc_text[:6000]}\n\n"
+        f"[用户问题] {effective_question}\n\n"
+        "重要要求：用户明确要求结合数据源时才允许查询数据库。回答时必须区分“文件内容结论”和“数据库查询结论”。"
     )
 
     # Store document knowledge temporarily for RAG

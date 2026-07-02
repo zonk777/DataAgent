@@ -56,27 +56,30 @@ const intentLabel = computed(() => {
 
 function statusIcon(status: string) {
   switch (status) {
-    case 'running': return '⏳'
+    case 'running': return '…'
     case 'completed': return '✓'
-    case 'error': return '✗'
-    default: return '○'
+    case 'error': return '!'
+    default: return '•'
   }
 }
 </script>
 
 <template>
-  <div class="thinking-block" :class="{ collapsed }">
+  <div class="thinking-block" :class="{ collapsed, streaming: isStreaming }">
     <button class="thinking-block-header" @click="emit('toggle')">
-      <span class="arrow">{{ collapsed ? '▸' : '▾' }}</span>
+      <span class="thinking-ring" :class="{ spinning: isStreaming }">
+        <span>{{ doneCount }}</span>
+      </span>
       <span class="summary">
         <template v-if="collapsed">
           已完成 {{ doneCount }}/{{ totalCount }} 步分析
           <em v-if="intentLabel"> · {{ intentLabel }}</em>
         </template>
         <template v-else>
-          分析进度 {{ doneCount }}/{{ totalCount }}
+          {{ isStreaming ? '智能体正在思考' : '分析进度' }} {{ doneCount }}/{{ totalCount }}
         </template>
       </span>
+      <span class="arrow">{{ collapsed ? '展开' : '收起' }}</span>
     </button>
     <div v-if="!collapsed" class="thinking-block-body">
       <div class="thinking-steps">
